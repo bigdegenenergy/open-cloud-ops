@@ -5,7 +5,7 @@
 ```json
 {
   "review": {
-    "summary": "This PR implements a complex AI Ops platform but introduces Critical security and stability blockers. The API Gateway (Cerebra) currently has an authentication bypass and fatal race conditions in its routing and budgeting logic. The Backup service (Aegis) is architected to hold full archives in memory, causing OOM risks. These must be fixed before merging.",
+    "summary": "The platform implementation is impressive but contains critical vulnerabilities regarding authentication, denial-of-service (OOM), and SQL injection that must be resolved.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
@@ -13,73 +13,82 @@
       "id": 1,
       "severity": "critical",
       "file": "cerebra/internal/middleware/middleware.go",
-      "line": 15,
-      "title": "Authentication Bypass in API Gateway",
-      "description": "The `AuthMiddleware` validates API keys solely by checking if `len(apiKey) < 16`. There is no check against a database, hash map, or environment variable. Any arbitrary string of 16+ characters grants full access to the paid LLM proxy.",
-      "suggestion": "Implement actual validation against the `organizations` or `agents` database tables (preferably via a cached hash) to ensure the key is valid and active."
+      "line": 85,
+      "title": "Authentication bypass via ID-as-Secret",
+      "description": "The AuthMiddleware validates API keys by performing a direct lookup on the 'id' column of the organizations and agents tables. In many systems, IDs (especially UUIDs) are treated as public or semi-public metadata. Using the primary key ID as the secret API key is a security antipattern.",
+      "suggestion": "Implement a proper API Key system where keys consist of a 'key_id' (public) and a 'secret_value' (stored as a hash). Validate the provided key against the hash in the database."
     },
     {
       "id": 2,
       "severity": "critical",
-      "file": "cerebra/internal/router/router.go",
-      "line": 45,
-      "title": "Fatal Race Condition in Router Metrics",
-      "description": "The `UpdateMetrics` method modifies the `r.metrics` map and its entries without any mutex locking. Since `r.metrics` is shared across all requests, concurrent traffic will cause a 'concurrent map read and map write' panic, crashing the service.",
-      "suggestion": "Add a `sync.RWMutex` to the `Router` struct and acquire a Lock/RLock when accessing `r.metrics`."
+      "file": "aegis/internal/backup/manager.go",
+      "line": 215,
+      "title": "OOM vulnerability in archive creation",
+      "description": "The 'createArchive' function uses a bytes.Buffer to store the entire tarball in memory before writing it to the storage backend. If a Kubernetes namespace contains large resources (e.g., large ConfigMaps or many objects), the service will exhaust its memory and crash (OOM).",
+      "suggestion": "Stream the archive directly to a temporary file or use an io.Pipe to stream the tar writer output directly to the storage backend's 'Write' method."
     },
     {
       "id": 3,
       "severity": "critical",
-      "file": "cerebra/internal/budget/enforcer.go",
-      "line": 60,
-      "title": "Fatal Race Condition in Budget Alerts",
-      "description": "The `alertsSent` map is accessed and modified in `checkAlertThresholds` without locking. As budget checks happen on every request, this causes a race condition that will panic the application.",
-      "suggestion": "Protect `alertsSent` with a `sync.Mutex`."
+      "file": "cerebra/internal/proxy/handler.go",
+      "line": 140,
+      "title": "Denial of Service via unbounded body buffering",
+      "description": "The proxy handler uses io.ReadAll(r.Body) to capture the request payload for cost estimation and logging. An attacker can send a multi-gigabyte request to exhaust the gateway's memory.",
+      "suggestion": "Use http.MaxBytesReader to limit request sizes and stream the body if possible. If buffering is required for cost estimation, enforce a strict upper limit (e.g., 10MB)."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": "aegis/internal/backup/manager.go",
-      "line": 85,
-      "title": "Out-Of-Memory (OOM) Risk in Backup Creation",
-      "description": "`createArchive` writes the entire tarball to an in-memory `bytes.Buffer`. `ExecuteBackup` then passes this `[]byte` slice to the storage layer. For large backups (e.g., many resources or inclusion of large configmaps/secrets), this will exhaust container memory and kill the pod.",
-      "suggestion": "Refactor the `StorageBackend` interface to accept an `io.Reader` instead of `[]byte`. Stream the archive generation directly to the storage writer using `io.Pipe`."
+      "file": "cerebra/internal/analytics/insights.go",
+      "line": 95,
+      "title": "Potential SQL Injection in analytics reporting",
+      "description": "In GenerateReport, the 'dimension' variable is interpolated directly into the SQL query string using fmt.Sprintf. If the 'dimension' string is derived from user-provided URL parameters in cmd/main.go without strict allow-list validation, it allows for arbitrary SQL injection.",
+      "suggestion": "Use a strict switch statement or a map of allowed dimension strings to validate the input before interpolating it into the query."
     },
     {
       "id": 5,
       "severity": "important",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 110,
-      "title": "Broken Auth Propagation in Proxy",
-      "description": "The proxy explicitly deletes the `X-API-Key` header from the incoming request in `copyRequestHeaders` but does not appear to inject the platform's own upstream API key (e.g., for OpenAI/Anthropic) before forwarding. Unless the upstream provider accepts unauthenticated requests (unlikely), the proxy will fail.",
-      "suggestion": "Inject the appropriate upstream provider API key (from environment variables or secure configuration) into the request headers before forwarding."
+      "file": "economist/api/routes.py",
+      "line": 10,
+      "title": "Missing authentication on FinOps API",
+      "description": "The Economist API endpoints provide access to sensitive cloud cost data and governance policies but do not implement any authentication or authorization checks.",
+      "suggestion": "Implement a middleware or dependency injection (e.g., FastAPI Security) to verify API keys or JWTs for all non-health-check routes."
     },
     {
       "id": 6,
       "severity": "important",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 55,
-      "title": "Blocking I/O breaks LLM Streaming",
-      "description": "The handler reads the full response body using `io.ReadAll`. This prevents Server-Sent Events (SSE) streaming from working, which is standard for LLM interactions. It also doubles memory pressure.",
-      "suggestion": "Implement a streaming proxy that copies the response body to the client writer as it is received, rather than buffering it entirely."
+      "file": "aegis/api/handlers.go",
+      "line": 25,
+      "title": "Missing authentication on Resilience API",
+      "description": "The Aegis API allows triggering backups, executing recovery plans (which can overwrite cluster resources), and deleting backup jobs without any authentication.",
+      "suggestion": "Add an authentication middleware to the Gin router to ensure only authorized clients/agents can interact with the Resilience Engine."
     },
     {
       "id": 7,
       "severity": "important",
-      "file": ".github/workflows/onefilellm.yml",
-      "line": 40,
-      "title": "Insufficient SSRF Protection",
-      "description": "The regex-based blocklist for IPs (`127\\.`, `169\\.254\\.`, etc.) fails to block alternative IP representations (e.g., `2130706433` for 127.0.0.1, octal `0177.0.0.1`) or DNS rebinding attacks. This allows the workflow to be used to scan internal network resources.",
-      "suggestion": "Use a dedicated tool with robust SSRF protection or run the fetcher in a network-restricted container that cannot access private address ranges."
+      "file": ".claude/hooks/auto-approve.sh",
+      "line": 45,
+      "title": "Command Injection risk in auto-approval hook",
+      "description": "The script uses regex to blacklist shell metacharacters like ';', '&', and '|' to prevent command injection. Regex-based blacklisting is notoriously fragile and can often be bypassed with newline characters, backticks, or process substitution if not handled perfectly by the shell parser.",
+      "suggestion": "Instead of blacklisting characters, use a strict allow-list of approved command patterns or parse the command into an argument array and validate the binary being executed."
     },
     {
       "id": 8,
       "severity": "suggestion",
-      "file": ".claude/hooks/auto-approve.sh",
-      "line": 25,
-      "title": "Unsafe Auto-Approval of Test Runners",
-      "description": "The hook automatically approves commands starting with `pytest` and `cargo test`. In many environments, running tests executes arbitrary code (e.g., `build.rs`, `conftest.py`). If the agent is used in an untrusted repository, this is immediate RCE.",
-      "suggestion": "Remove test runners from the auto-approve list or restrict them to specific safe arguments/directories."
+      "file": "deploy/docker/Dockerfile.cerebra",
+      "line": 35,
+      "title": "Containers running as root",
+      "description": "All three module Dockerfiles (Cerebra, Economist, Aegis) lack a USER instruction, meaning the applications run as root. This increases the risk in the event of a container escape.",
+      "suggestion": "Create a non-privileged user (e.g., 'appuser') in the final stage of the multi-stage build and switch to it using the USER instruction."
+    },
+    {
+      "id": 9,
+      "severity": "suggestion",
+      "file": "cerebra/pkg/cache/cache.go",
+      "line": 82,
+      "title": "Non-atomic budget increment",
+      "description": "In IncrBudgetSpend, the EXPIRE call is separate from the INCRBYFLOAT. If the process crashes or Redis disconnects between these two calls, the budget key will live forever without a TTL.",
+      "suggestion": "Use a Lua script to perform the increment and set the TTL atomically, or use the newer SET...PX...NX pattern if applicable."
     }
   ]
 }
