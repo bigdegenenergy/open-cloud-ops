@@ -401,8 +401,9 @@ jobs:
           git reset --hard origin/${{ github.head_ref }}
 
           # Now add the new instructions file on top of latest remote
+          # Use -f because REVIEW_INSTRUCTIONS.md is in .gitignore (it's a transient CI artifact)
           cp /tmp/pr/REVIEW_INSTRUCTIONS.md .
-          git add REVIEW_INSTRUCTIONS.md
+          git add -f REVIEW_INSTRUCTIONS.md
           git commit -m "chore: add review instructions for coding agent [skip ci]"
           git push
 

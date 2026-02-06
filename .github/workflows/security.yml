@@ -138,11 +138,14 @@ jobs:
             -not -path "./.github/*" \
             -not -path "./.claude/*" \
             -not -path "./docs/onefilellm/*" \
+            -not -path "./tools/*" \
             -not -name "*.png" -not -name "*.jpg" -not -name "*.jpeg" \
             -not -name "*.gif" -not -name "*.ico" -not -name "*.svg" \
             -not -name "*.woff" -not -name "*.woff2" -not -name "*.ttf" \
             -not -name "*.pdf" -not -name "*.zip" -not -name "*.tar.gz" \
             -not -name "*.md" -not -name "*.toml" -not -name "*.yml" -not -name "*.yaml" \
+            -not -name "go.mod" -not -name "go.sum" \
+            -not -name "package-lock.json" -not -name "yarn.lock" -not -name "pnpm-lock.yaml" \
             2>/dev/null)
 
           # IMPORTANT: All PII patterns FAIL because this is a public repo.
