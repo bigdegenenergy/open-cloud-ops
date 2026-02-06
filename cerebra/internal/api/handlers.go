@@ -147,6 +147,10 @@ func (h *Handlers) CreateBudget(c *gin.Context) {
 		req.PeriodDays = 30
 	}
 
+	// Snapshot the existing budget (if any) so we can restore it on rollback
+	// instead of unconditionally deleting, which would destroy pre-existing data.
+	existing, _ := h.db.GetBudget(c.Request.Context(), req.Scope, req.EntityID)
+
 	b := &models.Budget{
 		ID:         uuid.New().String(),
 		Scope:      req.Scope,
@@ -164,8 +168,16 @@ func (h *Handlers) CreateBudget(c *gin.Context) {
 	// On failure, rollback the DB write to prevent an unenforced budget.
 	if err := h.enforcer.SetBudget(budget.BudgetScope(req.Scope), req.EntityID, req.LimitUSD); err != nil {
 		log.Printf("Redis sync failed for budget %s/%s, rolling back DB: %v", req.Scope, req.EntityID, err)
-		if rbErr := h.db.DeleteBudget(c.Request.Context(), req.Scope, req.EntityID); rbErr != nil {
-			log.Printf("Rollback also failed for budget %s/%s: %v", req.Scope, req.EntityID, rbErr)
+		if existing != nil {
+			// Restore the previous budget instead of deleting.
+			if rbErr := h.db.UpsertBudget(c.Request.Context(), existing); rbErr != nil {
+				log.Printf("Rollback (restore) failed for budget %s/%s: %v", req.Scope, req.EntityID, rbErr)
+			}
+		} else {
+			// No prior budget — safe to delete the newly created row.
+			if rbErr := h.db.DeleteBudget(c.Request.Context(), req.Scope, req.EntityID); rbErr != nil {
+				log.Printf("Rollback (delete) failed for budget %s/%s: %v", req.Scope, req.EntityID, rbErr)
+			}
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to sync budget to cache, operation rolled back"})
 		return

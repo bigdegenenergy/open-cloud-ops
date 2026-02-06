@@ -105,8 +105,9 @@ func (db *DB) UpsertBudget(ctx context.Context, b *models.Budget) error {
 		INSERT INTO budgets (id, scope, entity_id, limit_usd, spent_usd, period_days)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (scope, entity_id) DO UPDATE
-		SET limit_usd = EXCLUDED.limit_usd,
-		    updated_at = NOW()
+		SET limit_usd   = EXCLUDED.limit_usd,
+		    period_days  = EXCLUDED.period_days,
+		    updated_at   = NOW()
 	`, b.ID, b.Scope, b.EntityID, b.LimitUSD, b.SpentUSD, b.PeriodDays)
 	return err
 }

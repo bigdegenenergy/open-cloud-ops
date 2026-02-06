@@ -9,12 +9,14 @@
 
 # Only run formatting if a file was modified
 if [[ "$CLAUDE_TOOL_NAME" == "Edit" ]] || [[ "$CLAUDE_TOOL_NAME" == "Write" ]]; then
-    
-    # Extract the file path from the tool output (this is a simplified example)
-    # In practice, you'd parse the actual tool output
-    
+
+    # Ensure the reference file exists; create it on first run so -newer works.
+    if [[ ! -f /tmp/claude_last_run ]]; then
+        touch -t 197001010000 /tmp/claude_last_run
+    fi
+
     echo "🔧 Running post-tool-use formatting..."
-    
+
     # Python files - Black formatter
     if find . -name "*.py" -newer /tmp/claude_last_run 2>/dev/null | grep -q .; then
         echo "  Formatting Python files with Black..."

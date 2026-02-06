@@ -57,12 +57,13 @@ func (db *DB) Migrate(ctx context.Context) error {
 	}
 	defer conn.Release()
 
-	// pg_advisory_lock(1) blocks until the lock is available and auto-releases
-	// when the connection is returned to the pool (or explicitly unlocked).
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(1)); err != nil {
+	// Application-specific lock ID to avoid collisions with other apps on the
+	// same PostgreSQL instance. Derived from CRC32('cerebra_migrations').
+	const migrationLockID int64 = 0x4F43_4F01 // "OCO" prefix + 01
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
 		return fmt.Errorf("acquiring migration lock: %w", err)
 	}
-	defer conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", int64(1))
+	defer conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrationLockID)
 
 	schema := `
 	CREATE TABLE IF NOT EXISTS organizations (
