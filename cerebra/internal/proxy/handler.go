@@ -28,8 +28,9 @@ import (
 // maxRequestBodySize limits proxy request bodies to 10MB to prevent OOM.
 const maxRequestBodySize = 10 << 20 // 10 MB
 
-// maxResponseBodySize limits proxy response bodies to 100MB to prevent OOM.
-const maxResponseBodySize = 100 << 20 // 100 MB
+// maxResponseBodySize limits proxy response bodies to 10MB to prevent OOM.
+// LLM API responses are typically well under 1MB; streaming responses bypass this limit.
+const maxResponseBodySize = 10 << 20 // 10 MB
 
 // Provider represents a supported LLM API provider.
 type Provider string

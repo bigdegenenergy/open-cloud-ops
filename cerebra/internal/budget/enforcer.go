@@ -27,13 +27,16 @@ const (
 // Enforcer manages budget checks and enforcement using Redis for fast lookups
 // and PostgreSQL for persistence.
 type Enforcer struct {
-	rdb *redis.Client
-	dsn string // for direct DB access when needed
+	rdb      *redis.Client
+	failOpen bool // If true, allow requests when Redis is unreachable
 }
 
 // NewEnforcer creates a new budget Enforcer.
-func NewEnforcer(rdb *redis.Client) *Enforcer {
-	return &Enforcer{rdb: rdb}
+// failOpen controls behavior when Redis is unavailable:
+//   - true: allow requests (maximize availability, risk overspend)
+//   - false: block requests (maximize safety, risk downtime)
+func NewEnforcer(rdb *redis.Client, failOpen bool) *Enforcer {
+	return &Enforcer{rdb: rdb, failOpen: failOpen}
 }
 
 // checkBudgetScript checks if the entity's spend has reached its budget limit.
@@ -57,8 +60,7 @@ return 1
 // This is a pre-flight check only; actual cost is unknown until after the response.
 func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string) (bool, error) {
 	if e.rdb == nil {
-		// No Redis available — allow all requests (graceful degradation).
-		return true, nil
+		return e.failOpen, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -71,7 +73,8 @@ func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string) (bool, error)
 		[]string{limitKey, spentKey},
 	).Int64()
 	if err != nil {
-		return true, fmt.Errorf("checking budget: %w", err)
+		// Redis error — use fail-open/fail-closed policy.
+		return e.failOpen, fmt.Errorf("checking budget: %w", err)
 	}
 
 	switch result {

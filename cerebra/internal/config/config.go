@@ -13,6 +13,9 @@ type Config struct {
 	Port     string
 	LogLevel string
 
+	// Management API
+	AdminAPIKey string // Required for /api/v1 endpoints; empty = no auth
+
 	// Database
 	DBHost     string
 	DBPort     int
@@ -28,6 +31,9 @@ type Config struct {
 	RedisPort     int
 	RedisPassword string
 
+	// Budget enforcement
+	BudgetFailOpen bool // If true, allow requests when Redis is unreachable
+
 	// Provider API Keys (passed through, never stored)
 	OpenAIKey    string
 	AnthropicKey string
@@ -40,6 +46,8 @@ func Load() (*Config, error) {
 		Port:     getEnv("CEREBRA_PORT", "8080"),
 		LogLevel: getEnv("CEREBRA_LOG_LEVEL", "info"),
 
+		AdminAPIKey: os.Getenv("CEREBRA_ADMIN_API_KEY"),
+
 		DBHost:     getEnv("POSTGRES_HOST", "localhost"),
 		DBName:     getEnv("POSTGRES_DB", "opencloudops"),
 		DBUser:     getEnv("POSTGRES_USER", "oco_user"),
@@ -48,6 +56,8 @@ func Load() (*Config, error) {
 
 		RedisHost:     getEnv("REDIS_HOST", "localhost"),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),
+
+		BudgetFailOpen: getEnv("CEREBRA_BUDGET_FAIL_OPEN", "true") == "true",
 
 		OpenAIKey:    os.Getenv("OPENAI_API_KEY"),
 		AnthropicKey: os.Getenv("ANTHROPIC_API_KEY"),
@@ -73,6 +83,12 @@ func Load() (*Config, error) {
 func (c *Config) DSN() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName, c.DBSSLMode)
+}
+
+// RedactedDSN returns the DSN with the password masked for safe logging.
+func (c *Config) RedactedDSN() string {
+	return fmt.Sprintf("postgres://%s:***@%s:%d/%s?sslmode=%s",
+		c.DBUser, c.DBHost, c.DBPort, c.DBName, c.DBSSLMode)
 }
 
 // RedisAddr returns the Redis address in host:port format.

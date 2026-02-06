@@ -5,10 +5,11 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: oco-postgres
+    env_file: .env
     environment:
-      POSTGRES_DB: opencloudops
-      POSTGRES_USER: oco_user
-      POSTGRES_PASSWORD: oco_dev_password
+      POSTGRES_DB: ${POSTGRES_DB:-opencloudops}
+      POSTGRES_USER: ${POSTGRES_USER:-oco_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
       - "5432:5432"
     volumes:
@@ -39,16 +40,19 @@ services:
     container_name: oco-cerebra
     ports:
       - "8080:8080"
+    env_file: .env
     environment:
       CEREBRA_PORT: "8080"
       CEREBRA_LOG_LEVEL: debug
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: opencloudops
-      POSTGRES_USER: oco_user
-      POSTGRES_PASSWORD: oco_dev_password
+      POSTGRES_DB: ${POSTGRES_DB:-opencloudops}
+      POSTGRES_USER: ${POSTGRES_USER:-oco_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      CEREBRA_ADMIN_API_KEY: ${CEREBRA_ADMIN_API_KEY:-}
+      CEREBRA_BUDGET_FAIL_OPEN: ${CEREBRA_BUDGET_FAIL_OPEN:-true}
     depends_on:
       postgres:
         condition: service_healthy

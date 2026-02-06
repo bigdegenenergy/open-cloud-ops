@@ -5,14 +5,14 @@ import (
 )
 
 func TestNewEnforcer_NilRedis(t *testing.T) {
-	e := NewEnforcer(nil)
+	e := NewEnforcer(nil, true)
 	if e == nil {
 		t.Fatal("expected non-nil enforcer")
 	}
 }
 
 func TestCheckBudget_NilRedis_AllowsAll(t *testing.T) {
-	e := NewEnforcer(nil)
+	e := NewEnforcer(nil, true)
 
 	allowed, err := e.CheckBudget(ScopeAgent, "test-agent")
 	if err != nil {
@@ -23,8 +23,20 @@ func TestCheckBudget_NilRedis_AllowsAll(t *testing.T) {
 	}
 }
 
+func TestCheckBudget_NilRedis_FailClosed(t *testing.T) {
+	e := NewEnforcer(nil, false)
+
+	allowed, err := e.CheckBudget(ScopeAgent, "test-agent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Error("expected request to be blocked with nil Redis and fail-closed")
+	}
+}
+
 func TestRecordSpend_NilRedis_NoError(t *testing.T) {
-	e := NewEnforcer(nil)
+	e := NewEnforcer(nil, true)
 
 	err := e.RecordSpend(ScopeAgent, "test-agent", 5.0)
 	if err != nil {
@@ -33,7 +45,7 @@ func TestRecordSpend_NilRedis_NoError(t *testing.T) {
 }
 
 func TestRecordSpend_ZeroCost_NoError(t *testing.T) {
-	e := NewEnforcer(nil)
+	e := NewEnforcer(nil, true)
 
 	err := e.RecordSpend(ScopeAgent, "test-agent", 0)
 	if err != nil {
@@ -42,7 +54,7 @@ func TestRecordSpend_ZeroCost_NoError(t *testing.T) {
 }
 
 func TestSetBudget_NilRedis_NoError(t *testing.T) {
-	e := NewEnforcer(nil)
+	e := NewEnforcer(nil, true)
 
 	err := e.SetBudget(ScopeAgent, "test-agent", 100.0)
 	if err != nil {
@@ -51,7 +63,7 @@ func TestSetBudget_NilRedis_NoError(t *testing.T) {
 }
 
 func TestGetSpent_NilRedis_ReturnsZero(t *testing.T) {
-	e := NewEnforcer(nil)
+	e := NewEnforcer(nil, true)
 
 	spent, err := e.GetSpent(ScopeAgent, "test-agent")
 	if err != nil {
@@ -63,7 +75,7 @@ func TestGetSpent_NilRedis_ReturnsZero(t *testing.T) {
 }
 
 func TestResetSpend_NilRedis_NoError(t *testing.T) {
-	e := NewEnforcer(nil)
+	e := NewEnforcer(nil, true)
 
 	err := e.ResetSpend(ScopeAgent, "test-agent")
 	if err != nil {

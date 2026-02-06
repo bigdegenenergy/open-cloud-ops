@@ -90,19 +90,22 @@ Response includes cost metadata:
 
 Key variables (see `.env.example` for full list):
 
-| Variable            | Default        | Description           |
-| ------------------- | -------------- | --------------------- |
-| `CEREBRA_PORT`      | `8080`         | Server port           |
-| `POSTGRES_HOST`     | `localhost`    | PostgreSQL host       |
-| `POSTGRES_PORT`     | `5432`         | PostgreSQL port       |
-| `POSTGRES_DB`       | `opencloudops` | Database name         |
-| `POSTGRES_USER`     | `oco_user`     | Database user         |
-| `POSTGRES_PASSWORD` | _(empty)_      | Database password     |
-| `REDIS_HOST`        | `localhost`    | Redis host            |
-| `REDIS_PORT`        | `6379`         | Redis port            |
-| `OPENAI_API_KEY`    | _(empty)_      | Default OpenAI key    |
-| `ANTHROPIC_API_KEY` | _(empty)_      | Default Anthropic key |
-| `GOOGLE_API_KEY`    | _(empty)_      | Default Gemini key    |
+| Variable                   | Default        | Description                           |
+| -------------------------- | -------------- | ------------------------------------- |
+| `CEREBRA_PORT`             | `8080`         | Server port                           |
+| `CEREBRA_ADMIN_API_KEY`    | _(empty)_      | API key for management endpoints      |
+| `CEREBRA_BUDGET_FAIL_OPEN` | `true`         | Allow requests when Redis unavailable |
+| `POSTGRES_HOST`            | `localhost`    | PostgreSQL host                       |
+| `POSTGRES_PORT`            | `5432`         | PostgreSQL port                       |
+| `POSTGRES_DB`              | `opencloudops` | Database name                         |
+| `POSTGRES_USER`            | `oco_user`     | Database user                         |
+| `POSTGRES_PASSWORD`        | _(empty)_      | Database password                     |
+| `POSTGRES_SSLMODE`         | `disable`      | PostgreSQL SSL mode                   |
+| `REDIS_HOST`               | `localhost`    | Redis host                            |
+| `REDIS_PORT`               | `6379`         | Redis port                            |
+| `OPENAI_API_KEY`           | _(empty)_      | Default OpenAI key                    |
+| `ANTHROPIC_API_KEY`        | _(empty)_      | Default Anthropic key                 |
+| `GOOGLE_API_KEY`           | _(empty)_      | Default Gemini key                    |
 
 ## Development Notes
 

@@ -21,6 +21,24 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// apiKeyAuth returns a Gin middleware that validates the X-Admin-Key header.
+func apiKeyAuth(expectedKey string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.GetHeader("X-Admin-Key")
+		if key == "" {
+			key = c.GetHeader("Authorization")
+			if len(key) > 7 && key[:7] == "Bearer " {
+				key = key[7:]
+			}
+		}
+		if key != expectedKey {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: invalid or missing admin API key"})
+			return
+		}
+		c.Next()
+	}
+}
+
 func main() {
 	fmt.Println("==============================================")
 	fmt.Println("  Cerebra - Open Cloud Ops LLM Gateway")
@@ -69,7 +87,7 @@ func main() {
 	}
 
 	// Initialize components.
-	enforcer := budget.NewEnforcer(rdb)
+	enforcer := budget.NewEnforcer(rdb, cfg.BudgetFailOpen)
 	proxyHandler := proxy.NewProxyHandler(cfg, db, enforcer)
 	apiHandlers := api.NewHandlers(db, enforcer)
 
@@ -90,7 +108,7 @@ func main() {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:5173"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Agent-ID", "X-Team-ID", "X-Org-ID", "X-API-Key", "X-Goog-Api-Key"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Admin-Key", "X-Agent-ID", "X-Team-ID", "X-Org-ID", "X-API-Key", "X-Goog-Api-Key"},
 		ExposeHeaders:    []string{"X-Request-ID", "X-Cost-USD", "X-Latency-Ms"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
@@ -99,8 +117,14 @@ func main() {
 	// Health check.
 	r.GET("/health", apiHandlers.HealthCheck)
 
-	// API v1 routes.
+	// API v1 routes (protected by admin API key when configured).
 	v1 := r.Group("/api/v1")
+	if cfg.AdminAPIKey != "" {
+		v1.Use(apiKeyAuth(cfg.AdminAPIKey))
+		log.Println("Management API authentication enabled.")
+	} else {
+		log.Println("WARNING: CEREBRA_ADMIN_API_KEY not set. Management API is unauthenticated.")
+	}
 	{
 		// Cost data.
 		v1.GET("/costs/summary", apiHandlers.GetCostSummary)
