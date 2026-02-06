@@ -5,90 +5,81 @@
 ```json
 {
   "review": {
-    "summary": "The platform implementation is impressive but contains critical vulnerabilities regarding authentication, denial-of-service (OOM), and SQL injection that must be resolved.",
+    "summary": "The platform provides a robust multi-service architecture (Go/Python) with a sophisticated AI-driven development loop. However, critical security and stability issues persist: Aegis auth is structural only, Cerebra/Aegis both suffer from potential OOM via full body/buffer reading, and SQL construction in analytics remains vulnerable. Requesting changes to harden these areas before production deployment.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
     {
       "id": 1,
       "severity": "critical",
-      "file": "cerebra/internal/middleware/middleware.go",
-      "line": 85,
-      "title": "Authentication bypass via ID-as-Secret",
-      "description": "The AuthMiddleware validates API keys by performing a direct lookup on the 'id' column of the organizations and agents tables. In many systems, IDs (especially UUIDs) are treated as public or semi-public metadata. Using the primary key ID as the secret API key is a security antipattern.",
-      "suggestion": "Implement a proper API Key system where keys consist of a 'key_id' (public) and a 'secret_value' (stored as a hash). Validate the provided key against the hash in the database."
+      "file": "aegis/api/handlers.go",
+      "line": 45,
+      "title": "Insecure Authentication Logic",
+      "description": "The APIKeyAuth middleware only validates that the key length is >= 16. It does not perform any cryptographic verification or database lookup, allowing any string of sufficient length to bypass authentication.",
+      "suggestion": "Implement a proper lookup using a hashed version of the key against the api_keys table, similar to the implementation in Cerebra."
     },
     {
       "id": 2,
       "severity": "critical",
       "file": "aegis/internal/backup/manager.go",
-      "line": 215,
-      "title": "OOM vulnerability in archive creation",
-      "description": "The 'createArchive' function uses a bytes.Buffer to store the entire tarball in memory before writing it to the storage backend. If a Kubernetes namespace contains large resources (e.g., large ConfigMaps or many objects), the service will exhaust its memory and crash (OOM).",
-      "suggestion": "Stream the archive directly to a temporary file or use an io.Pipe to stream the tar writer output directly to the storage backend's 'Write' method."
+      "line": 150,
+      "title": "Potential OOM via Memory Buffering",
+      "description": "The createArchive function collects all Kubernetes resources and creates a tar.gz archive entirely in memory using bytes.Buffer or io.ReadAll. For large clusters, this will cause the service to crash with an Out of Memory error.",
+      "suggestion": "Use a streaming approach: pipe the tar/gzip writer directly to the file/storage writer instead of buffering the entire content in RAM."
     },
     {
       "id": 3,
       "severity": "critical",
       "file": "cerebra/internal/proxy/handler.go",
-      "line": 140,
-      "title": "Denial of Service via unbounded body buffering",
-      "description": "The proxy handler uses io.ReadAll(r.Body) to capture the request payload for cost estimation and logging. An attacker can send a multi-gigabyte request to exhaust the gateway's memory.",
-      "suggestion": "Use http.MaxBytesReader to limit request sizes and stream the body if possible. If buffering is required for cost estimation, enforce a strict upper limit (e.g., 10MB)."
+      "line": 110,
+      "title": "DoS Vulnerability via Unbounded Response Buffering",
+      "description": "The proxy handler uses io.ReadAll to read the entire response from upstream providers (OpenAI/Anthropic). While the request has a 10MB limit, the response does not, allowing a malicious or malfunctioning upstream to exhaust server memory.",
+      "suggestion": "Implement a LimitReader on the response body or stream the response directly to the client while calculating tokens on-the-fly."
     },
     {
       "id": 4,
-      "severity": "important",
+      "severity": "critical",
       "file": "cerebra/internal/analytics/insights.go",
-      "line": 95,
-      "title": "Potential SQL Injection in analytics reporting",
-      "description": "In GenerateReport, the 'dimension' variable is interpolated directly into the SQL query string using fmt.Sprintf. If the 'dimension' string is derived from user-provided URL parameters in cmd/main.go without strict allow-list validation, it allows for arbitrary SQL injection.",
-      "suggestion": "Use a strict switch statement or a map of allowed dimension strings to validate the input before interpolating it into the query."
+      "line": 150,
+      "title": "SQL Injection Risk",
+      "description": "The GenerateReport and GetTopSpenders functions use fmt.Sprintf to interpolate column names into SQL queries. Even with an allowlist, string interpolation for identifiers is a dangerous pattern.",
+      "suggestion": "Use pgx.Identifier to safely quote identifiers or restrict identifier selection to a strict mapping that does not use direct string interpolation."
     },
     {
       "id": 5,
       "severity": "important",
-      "file": "economist/api/routes.py",
-      "line": 10,
-      "title": "Missing authentication on FinOps API",
-      "description": "The Economist API endpoints provide access to sensitive cloud cost data and governance policies but do not implement any authentication or authorization checks.",
-      "suggestion": "Implement a middleware or dependency injection (e.g., FastAPI Security) to verify API keys or JWTs for all non-health-check routes."
+      "file": "economist/pkg/cost/calculator.py",
+      "line": 45,
+      "title": "Floating Point for Currency Math",
+      "description": "The calculator uses Python floats for currency normalization and aggregation. This will lead to precision errors (e.g., 0.1 + 0.2 != 0.3) which are unacceptable for financial/billing applications.",
+      "suggestion": "Refactor all cost calculations to use the 'decimal.Decimal' class."
     },
     {
       "id": 6,
       "severity": "important",
-      "file": "aegis/api/handlers.go",
-      "line": 25,
-      "title": "Missing authentication on Resilience API",
-      "description": "The Aegis API allows triggering backups, executing recovery plans (which can overwrite cluster resources), and deleting backup jobs without any authentication.",
-      "suggestion": "Add an authentication middleware to the Gin router to ensure only authorized clients/agents can interact with the Resilience Engine."
+      "file": ".claude/hooks/auto-approve.sh",
+      "line": 20,
+      "title": "Shell Injection Bypass Risk",
+      "description": "The hook uses regex to block characters like ';', '&', and '|'. This is insufficient to prevent shell injection, as bypasses using subshells $(...), backticks, or newline-delimited commands are likely possible.",
+      "suggestion": "Instead of a blacklist, use a strict whitelist of exact command paths and arguments, or rely on a safer execution environment that doesn't spawn a full shell."
     },
     {
       "id": 7,
       "severity": "important",
-      "file": ".claude/hooks/auto-approve.sh",
-      "line": 45,
-      "title": "Command Injection risk in auto-approval hook",
-      "description": "The script uses regex to blacklist shell metacharacters like ';', '&', and '|' to prevent command injection. Regex-based blacklisting is notoriously fragile and can often be bypassed with newline characters, backticks, or process substitution if not handled perfectly by the shell parser.",
-      "suggestion": "Instead of blacklisting characters, use a strict allow-list of approved command patterns or parse the command into an argument array and validate the binary being executed."
+      "file": "economist/api/routes.py",
+      "line": 10,
+      "title": "Missing API Authentication",
+      "description": "The Economist FastAPI endpoints lack any authentication or authorization decorators, exposing sensitive cloud cost and governance data to unauthenticated network access.",
+      "suggestion": "Implement a Security dependency (e.g., APIKey header) on all sensitive routes."
     },
     {
       "id": 8,
       "severity": "suggestion",
-      "file": "deploy/docker/Dockerfile.cerebra",
-      "line": 35,
-      "title": "Containers running as root",
-      "description": "All three module Dockerfiles (Cerebra, Economist, Aegis) lack a USER instruction, meaning the applications run as root. This increases the risk in the event of a container escape.",
-      "suggestion": "Create a non-privileged user (e.g., 'appuser') in the final stage of the multi-stage build and switch to it using the USER instruction."
-    },
-    {
-      "id": 9,
-      "severity": "suggestion",
-      "file": "cerebra/pkg/cache/cache.go",
-      "line": 82,
-      "title": "Non-atomic budget increment",
-      "description": "In IncrBudgetSpend, the EXPIRE call is separate from the INCRBYFLOAT. If the process crashes or Redis disconnects between these two calls, the budget key will live forever without a TTL.",
-      "suggestion": "Use a Lua script to perform the increment and set the TTL atomically, or use the newer SET...PX...NX pattern if applicable."
+      "file": "deploy/docker/docker-compose.yml",
+      "line": 85,
+      "title": "Insecure Default Credentials",
+      "description": "Hardcoded default passwords and 'admin/admin' credentials for Grafana are present in the configuration.",
+      "suggestion": "Remove default credentials and use environment variables for all secrets, ensuring they are not committed to version control."
     }
   ]
 }
