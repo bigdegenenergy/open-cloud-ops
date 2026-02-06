@@ -1,0 +1,47 @@
+# =============================================================================
+# Open Cloud Ops - Kubernetes Ingress
+# =============================================================================
+# Routes external traffic to the appropriate backend service based on path.
+# Requires an Ingress Controller (e.g., nginx-ingress) to be installed.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: open-cloud-ops-ingress
+  namespace: open-cloud-ops
+  labels:
+    app.kubernetes.io/part-of: open-cloud-ops
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          # Cerebra (LLM Gateway)
+          - path: /api/cerebra(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: cerebra
+                port:
+                  number: 8080
+
+          # Economist (FinOps Core)
+          - path: /api/economist(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: economist
+                port:
+                  number: 8081
+
+          # Aegis (Resilience Engine)
+          - path: /api/aegis(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: aegis
+                port:
+                  number: 8082

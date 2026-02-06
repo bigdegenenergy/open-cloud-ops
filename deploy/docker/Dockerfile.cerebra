@@ -1,0 +1,42 @@
+# =============================================================================
+# Cerebra (LLM Gateway) - Multi-stage Docker Build
+# =============================================================================
+# Stage 1: Build the Go binary
+# Stage 2: Minimal runtime image
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Build stage
+# ---------------------------------------------------------------------------
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+# Copy module files first for better layer caching
+COPY cerebra/ .
+
+# Download dependencies
+RUN go mod download
+
+# Build a statically-linked binary
+RUN CGO_ENABLED=0 go build -o cerebra ./cmd/main.go
+
+# ---------------------------------------------------------------------------
+# Runtime stage
+# ---------------------------------------------------------------------------
+FROM alpine:3.19
+
+# Install CA certificates for HTTPS calls to LLM providers
+RUN apk --no-cache add ca-certificates
+
+# Create non-root user
+RUN adduser -D -u 1001 appuser
+
+# Copy the compiled binary from the builder stage
+COPY --from=builder /app/cerebra /usr/local/bin/
+
+USER appuser
+
+EXPOSE 8080
+
+ENTRYPOINT ["cerebra"]

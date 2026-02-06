@@ -5,7 +5,17 @@
 // recommendations for reducing LLM API spend.
 package analytics
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/bigdegenenergy/open-cloud-ops/cerebra/pkg/models"
+)
 
 // InsightType categorizes the kind of insight generated.
 type InsightType string
@@ -29,52 +39,338 @@ const (
 
 // Insight represents an actionable recommendation or alert.
 type Insight struct {
-	ID              string
-	Type            InsightType
-	Severity        Severity
-	Title           string
-	Description     string
-	EstimatedSaving float64 // Potential monthly savings in USD
-	AffectedEntity  string  // Agent, team, or model affected
-	CreatedAt       time.Time
-	Dismissed       bool
+	ID              string      `json:"id"`
+	Type            InsightType `json:"type"`
+	Severity        Severity    `json:"severity"`
+	Title           string      `json:"title"`
+	Description     string      `json:"description"`
+	EstimatedSaving float64     `json:"estimated_saving"` // Potential monthly savings in USD
+	AffectedEntity  string      `json:"affected_entity"`  // Agent, team, or model affected
+	CreatedAt       time.Time   `json:"created_at"`
+	Dismissed       bool        `json:"dismissed"`
+}
+
+// SpikeThreshold is the multiplier above the rolling average that triggers a spike alert.
+const SpikeThreshold = 2.0
+
+// premiumModelAlternatives maps premium models to cheaper alternatives for recommendation.
+var premiumModelAlternatives = map[string]string{
+	"gpt-4-turbo":            "gpt-4o",
+	"gpt-4":                  "gpt-4o",
+	"o1":                     "gpt-4o",
+	"claude-3-opus-20240229": "claude-3-5-sonnet-20241022",
+	"gemini-ultra":           "gemini-1.5-pro",
 }
 
 // InsightsEngine generates and manages cost insights.
 type InsightsEngine struct {
-	// TODO: Add fields for database, ML model, notification service, etc.
+	pool *pgxpool.Pool
 }
 
 // NewInsightsEngine creates a new InsightsEngine.
-func NewInsightsEngine() *InsightsEngine {
-	return &InsightsEngine{}
+func NewInsightsEngine(pool *pgxpool.Pool) *InsightsEngine {
+	return &InsightsEngine{
+		pool: pool,
+	}
 }
 
 // DetectSpikes analyzes recent usage data to identify cost spikes.
-func (e *InsightsEngine) DetectSpikes() ([]Insight, error) {
-	// TODO: Implement spike detection:
-	// 1. Query recent cost data from the database.
-	// 2. Calculate rolling averages and standard deviations.
-	// 3. Flag any data points that exceed the baseline by a threshold (e.g., 2x).
-	// 4. Generate Insight objects for each detected spike.
-	return nil, nil
+// It compares the cost in the recent lookbackHours to the rolling average
+// of the prior 7 days, and flags any period where cost exceeds 2x the average.
+func (e *InsightsEngine) DetectSpikes(lookbackHours int) ([]Insight, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if lookbackHours <= 0 {
+		lookbackHours = 1
+	}
+
+	var insights []Insight
+
+	// Query recent hourly costs grouped by agent/team, then compare to rolling average
+	query := `
+		WITH recent_costs AS (
+			SELECT
+				agent_id,
+				team_id,
+				SUM(cost_usd) AS recent_cost,
+				COUNT(*) AS recent_requests
+			FROM api_requests
+			WHERE timestamp > NOW() - INTERVAL '1 hour' * $1
+			GROUP BY agent_id, team_id
+		),
+		baseline_costs AS (
+			SELECT
+				agent_id,
+				team_id,
+				SUM(cost_usd) / GREATEST(EXTRACT(EPOCH FROM (NOW() - MIN(timestamp))) / 3600, 1) * $1 AS avg_cost_per_period,
+				COUNT(*) AS baseline_requests
+			FROM api_requests
+			WHERE timestamp > NOW() - INTERVAL '7 days'
+			  AND timestamp <= NOW() - INTERVAL '1 hour' * $1
+			GROUP BY agent_id, team_id
+		)
+		SELECT
+			r.agent_id,
+			r.team_id,
+			r.recent_cost,
+			r.recent_requests,
+			COALESCE(b.avg_cost_per_period, 0) AS avg_cost,
+			COALESCE(b.baseline_requests, 0) AS baseline_requests
+		FROM recent_costs r
+		LEFT JOIN baseline_costs b ON r.agent_id = b.agent_id AND r.team_id = b.team_id
+		WHERE COALESCE(b.avg_cost_per_period, 0) > 0
+		  AND r.recent_cost > COALESCE(b.avg_cost_per_period, 0) * $2
+	`
+
+	rows, err := e.pool.Query(ctx, query, lookbackHours, SpikeThreshold)
+	if err != nil {
+		return nil, fmt.Errorf("analytics: failed to detect spikes: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var agentID, teamID string
+		var recentCost, avgCost float64
+		var recentRequests, baselineRequests int64
+
+		if err := rows.Scan(&agentID, &teamID, &recentCost, &recentRequests, &avgCost, &baselineRequests); err != nil {
+			log.Printf("analytics: error scanning spike row: %v", err)
+			continue
+		}
+
+		multiplier := recentCost / avgCost
+		affectedEntity := agentID
+		if affectedEntity == "" {
+			affectedEntity = teamID
+		}
+
+		severity := SeverityWarning
+		if multiplier >= 5.0 {
+			severity = SeverityCritical
+		}
+
+		insight := Insight{
+			ID:       uuid.New().String(),
+			Type:     InsightCostSpike,
+			Severity: severity,
+			Title:    fmt.Sprintf("Cost spike detected: %.1fx above average", multiplier),
+			Description: fmt.Sprintf(
+				"Entity %s spent $%.4f in the last %d hour(s), which is %.1fx the rolling average of $%.4f. "+
+					"Recent requests: %d, baseline requests: %d.",
+				affectedEntity, recentCost, lookbackHours, multiplier, avgCost,
+				recentRequests, baselineRequests,
+			),
+			EstimatedSaving: recentCost - avgCost,
+			AffectedEntity:  affectedEntity,
+			CreatedAt:       time.Now(),
+		}
+
+		insights = append(insights, insight)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("analytics: error iterating spike results: %w", err)
+	}
+
+	return insights, nil
 }
 
 // RecommendModelSwitches identifies opportunities to use cheaper models.
+// It looks for agents/teams using premium-tier models that could potentially
+// use standard or economy tier models instead, and estimates the savings.
 func (e *InsightsEngine) RecommendModelSwitches() ([]Insight, error) {
-	// TODO: Implement model switch recommendations:
-	// 1. Analyze query patterns and model usage.
-	// 2. Identify queries sent to premium models that could be handled by cheaper ones.
-	// 3. Estimate potential savings from switching.
-	// 4. Generate Insight objects with specific recommendations.
-	return nil, nil
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var insights []Insight
+
+	// Find agents/models using premium models with high request volumes
+	query := `
+		SELECT
+			agent_id,
+			team_id,
+			model,
+			provider,
+			COUNT(*) AS request_count,
+			SUM(cost_usd) AS total_cost,
+			AVG(input_tokens) AS avg_input_tokens,
+			AVG(output_tokens) AS avg_output_tokens
+		FROM api_requests
+		WHERE timestamp > NOW() - INTERVAL '30 days'
+		  AND model != ''
+		GROUP BY agent_id, team_id, model, provider
+		HAVING COUNT(*) >= 10
+		ORDER BY SUM(cost_usd) DESC
+		LIMIT 50
+	`
+
+	rows, err := e.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("analytics: failed to query model usage: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var agentID, teamID, model, provider string
+		var requestCount int64
+		var totalCost, avgInputTokens, avgOutputTokens float64
+
+		if err := rows.Scan(&agentID, &teamID, &model, &provider, &requestCount, &totalCost, &avgInputTokens, &avgOutputTokens); err != nil {
+			log.Printf("analytics: error scanning model switch row: %v", err)
+			continue
+		}
+
+		// Check if there is a cheaper alternative for this model
+		alternative, hasAlternative := premiumModelAlternatives[model]
+		if !hasAlternative {
+			continue
+		}
+
+		// Estimate savings: assume the alternative costs ~60% less on average
+		estimatedSavings := totalCost * 0.60
+
+		affectedEntity := agentID
+		if affectedEntity == "" {
+			affectedEntity = teamID
+		}
+
+		insight := Insight{
+			ID:       uuid.New().String(),
+			Type:     InsightModelSwitch,
+			Severity: SeverityInfo,
+			Title:    fmt.Sprintf("Consider switching from %s to %s", model, alternative),
+			Description: fmt.Sprintf(
+				"Entity %s made %d requests to %s (%s) in the last 30 days, costing $%.2f total. "+
+					"Average request size: %.0f input / %.0f output tokens. "+
+					"Switching to %s could save approximately $%.2f/month.",
+				affectedEntity, requestCount, model, provider, totalCost,
+				avgInputTokens, avgOutputTokens,
+				alternative, estimatedSavings,
+			),
+			EstimatedSaving: estimatedSavings,
+			AffectedEntity:  affectedEntity,
+			CreatedAt:       time.Now(),
+		}
+
+		insights = append(insights, insight)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("analytics: error iterating model switch results: %w", err)
+	}
+
+	return insights, nil
+}
+
+// columnForDimension returns the safe SQL column name for a given dimension.
+// It uses a strict mapping rather than string interpolation to prevent SQL injection.
+var dimensionColumns = map[string]string{
+	"agent":    "agent_id",
+	"team":     "team_id",
+	"model":    "model",
+	"provider": "provider",
 }
 
 // GenerateReport creates a summary report for a given time period.
-func (e *InsightsEngine) GenerateReport(from, to time.Time) {
-	// TODO: Implement report generation:
-	// 1. Aggregate cost data by agent, team, model, and provider.
-	// 2. Calculate trends and comparisons to previous periods.
-	// 3. Include top insights and recommendations.
-	// 4. Format as a structured report.
+// It aggregates cost data into CostSummary objects by multiple dimensions
+// (agent, team, model, provider).
+func (e *InsightsEngine) GenerateReport(from, to time.Time) ([]models.CostSummary, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var summaries []models.CostSummary
+
+	for _, dimName := range []string{"agent", "team", "model", "provider"} {
+		colName, ok := dimensionColumns[dimName]
+		if !ok {
+			continue
+		}
+
+		// Use a pre-defined query per dimension to avoid any string interpolation
+		var query string
+		switch colName {
+		case "agent_id":
+			query = `SELECT agent_id, agent_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND agent_id != '' GROUP BY agent_id ORDER BY 3 DESC LIMIT 100`
+		case "team_id":
+			query = `SELECT team_id, team_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND team_id != '' GROUP BY team_id ORDER BY 3 DESC LIMIT 100`
+		case "model":
+			query = `SELECT model, model, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND model != '' GROUP BY model ORDER BY 3 DESC LIMIT 100`
+		case "provider":
+			query = `SELECT provider, provider, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND provider != '' GROUP BY provider ORDER BY 3 DESC LIMIT 100`
+		}
+
+		rows, err := e.pool.Query(ctx, query, from, to)
+		if err != nil {
+			log.Printf("analytics: failed to generate report for dimension %s: %v", dimName, err)
+			continue
+		}
+
+		for rows.Next() {
+			var summary models.CostSummary
+			var dimID, dimNameStr string
+			if err := rows.Scan(&dimID, &dimNameStr, &summary.TotalCostUSD, &summary.TotalRequests,
+				&summary.TotalTokens, &summary.AvgLatencyMs, &summary.TotalSavings); err != nil {
+				log.Printf("analytics: error scanning report row for %s: %v", dimName, err)
+				continue
+			}
+
+			summary.Dimension = dimName
+			summary.DimensionID = dimID
+			summary.DimensionName = dimNameStr
+
+			summaries = append(summaries, summary)
+		}
+		rows.Close()
+	}
+
+	return summaries, nil
+}
+
+// GetTopSpenders returns the top N entities by cost for a given time window.
+func (e *InsightsEngine) GetTopSpenders(ctx context.Context, dimension string, limit int, since time.Time) ([]models.CostSummary, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	colName, ok := dimensionColumns[dimension]
+	if !ok {
+		return nil, fmt.Errorf("analytics: unsupported dimension: %s", dimension)
+	}
+
+	// Use pre-defined queries to avoid identifier interpolation entirely
+	var query string
+	switch colName {
+	case "agent_id":
+		query = `SELECT agent_id, agent_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND agent_id != '' GROUP BY agent_id ORDER BY 3 DESC LIMIT $2`
+	case "team_id":
+		query = `SELECT team_id, team_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND team_id != '' GROUP BY team_id ORDER BY 3 DESC LIMIT $2`
+	case "model":
+		query = `SELECT model, model, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND model != '' GROUP BY model ORDER BY 3 DESC LIMIT $2`
+	case "provider":
+		query = `SELECT provider, provider, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND provider != '' GROUP BY provider ORDER BY 3 DESC LIMIT $2`
+	}
+
+	rows, err := e.pool.Query(ctx, query, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("analytics: failed to get top spenders: %w", err)
+	}
+	defer rows.Close()
+
+	var summaries []models.CostSummary
+	for rows.Next() {
+		var summary models.CostSummary
+		var dimID, dimName string
+		if err := rows.Scan(&dimID, &dimName, &summary.TotalCostUSD, &summary.TotalRequests,
+			&summary.TotalTokens, &summary.AvgLatencyMs, &summary.TotalSavings); err != nil {
+			return nil, fmt.Errorf("analytics: error scanning top spenders row: %w", err)
+		}
+
+		summary.Dimension = dimension
+		summary.DimensionID = dimID
+		summary.DimensionName = dimName
+		summaries = append(summaries, summary)
+	}
+
+	return summaries, nil
 }

@@ -1,0 +1,448 @@
+name: OneFileLLM Content Aggregator
+
+on:
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: 'Input sources (space-separated URLs, paths, or GitHub repos)'
+        required: true
+        type: string
+      output_name:
+        description: 'Output filename (auto-generated from source if left empty)'
+        required: false
+        default: ''
+        type: string
+      format:
+        description: 'Output format override'
+        required: false
+        type: choice
+        options:
+          - auto
+          - text
+          - markdown
+          - json
+          - html
+          - yaml
+        default: auto
+      crawl_depth:
+        description: 'Max crawl depth for web URLs'
+        required: false
+        default: '3'
+        type: string
+      crawl_max_pages:
+        description: 'Max pages to crawl'
+        required: false
+        default: '100'
+        type: string
+
+  # Allow calling from other workflows
+  workflow_call:
+    inputs:
+      sources:
+        description: 'Input sources (space-separated URLs, paths, or GitHub repos)'
+        required: true
+        type: string
+      output_name:
+        description: 'Output filename (auto-generated from source if left empty)'
+        required: false
+        default: ''
+        type: string
+      format:
+        description: 'Output format override'
+        required: false
+        type: string
+        default: auto
+      crawl_depth:
+        description: 'Max crawl depth for web URLs'
+        required: false
+        default: '3'
+        type: string
+      crawl_max_pages:
+        description: 'Max pages to crawl'
+        required: false
+        default: '100'
+        type: string
+    outputs:
+      output_file:
+        description: 'Path to the generated output file'
+        value: ${{ jobs.aggregate.outputs.output_file }}
+      token_count:
+        description: 'Estimated token count'
+        value: ${{ jobs.aggregate.outputs.token_count }}
+      pr_url:
+        description: 'URL of the created pull request'
+        value: ${{ jobs.commit-and-merge.outputs.pr_url }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  aggregate:
+    name: Aggregate Content
+    runs-on: ubuntu-latest
+    outputs:
+      output_file: ${{ steps.run.outputs.output_file }}
+      token_count: ${{ steps.run.outputs.token_count }}
+      branch_name: ${{ steps.branch.outputs.name }}
+      safe_output_name: ${{ steps.validate.outputs.safe_output_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate and sanitize inputs
+        id: validate
+        env:
+          INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
+          INPUT_CRAWL_DEPTH: ${{ inputs.crawl_depth }}
+          INPUT_CRAWL_MAX_PAGES: ${{ inputs.crawl_max_pages }}
+          INPUT_FORMAT: ${{ inputs.format }}
+          INPUT_SOURCES: ${{ inputs.sources }}
+        run: |
+          # SECURITY: Disable glob expansion to prevent wildcard injection
+          set -f
+
+          # Auto-generate output name from first source if not provided
+          if [ -z "$INPUT_OUTPUT_NAME" ]; then
+            # Get the first source
+            FIRST_SOURCE=$(echo "$INPUT_SOURCES" | awk '{print $1}')
+
+            # Extract name based on source type
+            if [[ "$FIRST_SOURCE" =~ ^https?://github\.com/([^/]+)/([^/]+) ]]; then
+              # GitHub repo: use owner-repo format
+              OWNER="${BASH_REMATCH[1]}"
+              REPO="${BASH_REMATCH[2]}"
+              # Remove .git suffix if present
+              REPO="${REPO%.git}"
+              AUTO_NAME="${OWNER}-${REPO}"
+            elif [[ "$FIRST_SOURCE" =~ ^https?://([^/]+) ]]; then
+              # Other URL: use domain name
+              DOMAIN="${BASH_REMATCH[1]}"
+              # Remove www. prefix and common TLDs for cleaner name
+              AUTO_NAME=$(echo "$DOMAIN" | sed -E 's/^www\.//; s/\.(com|org|io|net|dev)$//; s/\./-/g')
+            elif [[ "$FIRST_SOURCE" =~ ^\.?/?(.+)$ ]]; then
+              # Local path: use directory/file name
+              AUTO_NAME=$(basename "$FIRST_SOURCE" | tr -cd '[:alnum:]-_')
+            else
+              AUTO_NAME="aggregated-content"
+            fi
+
+            # Sanitize the auto-generated name
+            SAFE_OUTPUT_NAME=$(echo "$AUTO_NAME" | tr -cd '[:alnum:]-_' | tr '[:upper:]' '[:lower:]')
+          else
+            # Sanitize user-provided output_name
+            SAFE_OUTPUT_NAME=$(echo "$INPUT_OUTPUT_NAME" | tr -cd '[:alnum:]-_')
+          fi
+
+          # Fallback if empty
+          if [ -z "$SAFE_OUTPUT_NAME" ]; then
+            SAFE_OUTPUT_NAME="aggregated-content"
+          fi
+
+          echo "Auto-generated output name: $SAFE_OUTPUT_NAME"
+          echo "safe_output_name=${SAFE_OUTPUT_NAME}" >> $GITHUB_OUTPUT
+
+          # Validate crawl_depth is a number
+          if ! [[ "$INPUT_CRAWL_DEPTH" =~ ^[0-9]+$ ]]; then
+            echo "Error: crawl_depth must be a positive integer"
+            exit 1
+          fi
+
+          # Validate crawl_max_pages is a number
+          if ! [[ "$INPUT_CRAWL_MAX_PAGES" =~ ^[0-9]+$ ]]; then
+            echo "Error: crawl_max_pages must be a positive integer"
+            exit 1
+          fi
+
+          # Validate format is one of the allowed values
+          case "$INPUT_FORMAT" in
+            auto|text|markdown|json|html|yaml) ;;
+            *)
+              echo "Error: format must be one of: auto, text, markdown, json, html, yaml"
+              exit 1
+              ;;
+          esac
+
+          # Validate sources using strict ALLOWLIST approach
+          # SECURITY: Only permit characters that are safe in shell contexts
+          # Allowed: alphanumeric, dots, hyphens, underscores, slashes, colons, @, %, ?, =, #, +, ~
+          # BLOCKED (shell metacharacters): $ ` ; | & ( ) * ' " > < { } [ ] ! \
+          # URLs with & or other blocked chars must use URL encoding (e.g., %26 for &)
+          for source in $INPUT_SOURCES; do
+            # Must not start with a dash (prevents flag injection)
+            if [[ "$source" =~ ^- ]]; then
+              echo "Error: Source '$source' starts with a dash. This is not allowed to prevent argument injection."
+              exit 1
+            fi
+            # Strict allowlist: only truly safe URL and path characters
+            # This blocks all shell metacharacters that could enable injection
+            if ! [[ "$source" =~ ^[a-zA-Z0-9._~:/@%?=#+,-]+$ ]]; then
+              echo "Error: Source '$source' contains unsafe characters."
+              echo "Allowed: a-z A-Z 0-9 . _ ~ : / @ % ? = # + , -"
+              echo "For URLs with & or special chars, use URL encoding (e.g., %26 for &)"
+              exit 1
+            fi
+          done
+
+          # Validate URLs to prevent SSRF (Issue #2)
+          # Block private IP ranges, loopback, and cloud metadata services
+          for source in $INPUT_SOURCES; do
+            # Extract URL scheme and host if it looks like a URL
+            if [[ "$source" =~ ^https?:// ]]; then
+              # Extract hostname from URL
+              hostname=$(echo "$source" | sed -E 's|^https?://([^/:]+).*|\1|')
+
+              # Block loopback addresses
+              if [[ "$hostname" =~ ^(localhost|127\.|0\.0\.0\.0) ]]; then
+                echo "Error: Source '$source' targets loopback address. This is not allowed for security reasons."
+                exit 1
+              fi
+
+              # Block private IP ranges (RFC1918)
+              if [[ "$hostname" =~ ^10\. ]] || \
+                 [[ "$hostname" =~ ^192\.168\. ]] || \
+                 [[ "$hostname" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+                echo "Error: Source '$source' targets private IP range. This is not allowed for security reasons."
+                exit 1
+              fi
+
+              # Block cloud metadata services
+              if [[ "$hostname" =~ ^169\.254\.169\.254 ]] || \
+                 [[ "$hostname" =~ ^metadata\. ]] || \
+                 [[ "$hostname" = "metadata" ]]; then
+                echo "Error: Source '$source' targets cloud metadata service. This is not allowed for security reasons."
+                exit 1
+              fi
+
+              # Block link-local addresses
+              if [[ "$hostname" =~ ^169\.254\. ]]; then
+                echo "Error: Source '$source' targets link-local address. This is not allowed for security reasons."
+                exit 1
+              fi
+            fi
+          done
+
+          echo "Inputs validated successfully"
+
+      - name: Generate branch name
+        id: branch
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BRANCH_NAME="onefilellm/output-${TIMESTAMP}"
+          echo "name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+          echo "Branch name: ${BRANCH_NAME}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'tools/onefilellm/requirements.txt'
+
+      - name: Install onefilellm
+        run: |
+          pip install -r tools/onefilellm/requirements.txt
+          # Verify installation
+          onefilellm --help || python -m onefilellm --help
+
+      - name: Run onefilellm
+        id: run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          INPUT_SOURCES: ${{ inputs.sources }}
+          INPUT_FORMAT: ${{ inputs.format }}
+          INPUT_CRAWL_DEPTH: ${{ inputs.crawl_depth }}
+          INPUT_CRAWL_MAX_PAGES: ${{ inputs.crawl_max_pages }}
+          SAFE_OUTPUT_NAME: ${{ steps.validate.outputs.safe_output_name }}
+        run: |
+          # SECURITY: Disable glob expansion to prevent wildcard injection
+          set -f
+
+          # Create docs directory if it doesn't exist
+          mkdir -p docs/onefilellm
+
+          # Build command arguments array for safety
+          ARGS=()
+
+          # Add format if not auto
+          if [ "$INPUT_FORMAT" != "auto" ]; then
+            ARGS+=("-f" "$INPUT_FORMAT")
+          fi
+
+          # Add crawl options
+          ARGS+=("--crawl-max-depth" "$INPUT_CRAWL_DEPTH")
+          ARGS+=("--crawl-max-pages" "$INPUT_CRAWL_MAX_PAGES")
+
+          OUTPUT_FILE="docs/onefilellm/${SAFE_OUTPUT_NAME}.xml"
+
+          echo "Running onefilellm with validated inputs..."
+          echo "Output will be saved to: $OUTPUT_FILE"
+
+          # Execute onefilellm - it writes to output.xml by default
+          # Use -- separator to prevent argument injection (sources validated in earlier step)
+          # Note: INPUT_SOURCES is intentionally not quoted to allow space-separated sources
+          if onefilellm "${ARGS[@]}" -- $INPUT_SOURCES; then
+            echo "onefilellm completed successfully"
+          else
+            # If direct call fails, try with python -m
+            python -m onefilellm "${ARGS[@]}" -- $INPUT_SOURCES || {
+              echo "Error: onefilellm failed"
+              exit 1
+            }
+          fi
+
+          # onefilellm writes to output.xml by default - move it to our target location
+          if [ -f "output.xml" ] && [ -s "output.xml" ]; then
+            mv "output.xml" "$OUTPUT_FILE"
+            echo "Moved output.xml to $OUTPUT_FILE"
+          elif [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
+            echo "Output already at target location"
+          else
+            echo "Error: No output.xml generated"
+            ls -la
+            exit 1
+          fi
+
+          # Verify output was generated
+          if [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
+            echo "output_file=${OUTPUT_FILE}" >> $GITHUB_OUTPUT
+
+            # Estimate token count (rough approximation: chars / 4)
+            CHARS=$(wc -c < "$OUTPUT_FILE")
+            TOKENS=$((CHARS / 4))
+            echo "token_count=$TOKENS" >> $GITHUB_OUTPUT
+
+            echo "Generated output with ~$TOKENS estimated tokens"
+            echo "File size: $(du -h "$OUTPUT_FILE" | cut -f1)"
+          else
+            echo "Error: No output generated at $OUTPUT_FILE"
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.validate.outputs.safe_output_name }}
+          path: docs/onefilellm/${{ steps.validate.outputs.safe_output_name }}.xml
+          retention-days: 30
+
+  commit-and-merge:
+    name: Commit, PR, and Merge
+    needs: aggregate
+    runs-on: ubuntu-latest
+    outputs:
+      pr_url: ${{ steps.create-pr.outputs.pull-request-url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.aggregate.outputs.safe_output_name }}
+          path: docs/onefilellm/
+
+      - name: Create branch and commit
+        id: commit
+        env:
+          BRANCH_NAME: ${{ needs.aggregate.outputs.branch_name }}
+          SAFE_OUTPUT_NAME: ${{ needs.aggregate.outputs.safe_output_name }}
+          TOKEN_COUNT: ${{ needs.aggregate.outputs.token_count }}
+          INPUT_SOURCES: ${{ inputs.sources }}
+        run: |
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create and switch to new branch
+          git checkout -b "$BRANCH_NAME"
+
+          # Add the output file
+          git add docs/onefilellm/
+
+          # Commit with safe message (sources shown for reference only)
+          git commit -m "docs: add OneFileLLM aggregated content
+
+          Output: docs/onefilellm/${SAFE_OUTPUT_NAME}.xml
+          Tokens: ~${TOKEN_COUNT}
+
+          [skip ci]"
+
+          # Push the branch
+          git push -u origin "$BRANCH_NAME"
+
+          echo "branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Create Pull Request
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ needs.aggregate.outputs.branch_name }}
+          SAFE_OUTPUT_NAME: ${{ needs.aggregate.outputs.safe_output_name }}
+          TOKEN_COUNT: ${{ needs.aggregate.outputs.token_count }}
+        run: |
+          PR_BODY="## OneFileLLM Content Aggregation
+
+          **Output file:** \`docs/onefilellm/${SAFE_OUTPUT_NAME}.xml\`
+
+          **Estimated tokens:** ~${TOKEN_COUNT}
+
+          ---
+          *Auto-generated by OneFileLLM workflow*"
+
+          PR_URL=$(gh pr create \
+            --title "docs: add OneFileLLM output - ${SAFE_OUTPUT_NAME}" \
+            --body "$PR_BODY" \
+            --head "$BRANCH_NAME" \
+            --base main)
+
+          echo "pull-request-url=${PR_URL}" >> $GITHUB_OUTPUT
+          echo "Created PR: ${PR_URL}"
+
+      - name: Merge Pull Request
+        id: merge
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ steps.create-pr.outputs.pull-request-url }}
+        run: |
+          # Merge the PR immediately (squash merge)
+          # This may fail if:
+          # - Token lacks write permissions
+          # - Branch protection rules require reviews
+          # - Merge conflicts exist
+          if gh pr merge "$PR_URL" --squash --delete-branch 2>&1; then
+            echo "merged=true" >> $GITHUB_OUTPUT
+            echo "PR merged successfully: $PR_URL"
+          else
+            echo "merged=false" >> $GITHUB_OUTPUT
+            echo "Could not merge PR (may require manual merge or review)"
+            echo "PR created: $PR_URL"
+          fi
+
+      - name: Summary
+        env:
+          SAFE_OUTPUT_NAME: ${{ needs.aggregate.outputs.safe_output_name }}
+          TOKEN_COUNT: ${{ needs.aggregate.outputs.token_count }}
+          PR_URL: ${{ steps.create-pr.outputs.pull-request-url }}
+          MERGED: ${{ steps.merge.outputs.merged }}
+        run: |
+          {
+            echo "## OneFileLLM Output Summary"
+            echo ""
+            echo "**Output file:** \`docs/onefilellm/${SAFE_OUTPUT_NAME}.xml\`"
+            echo ""
+            echo "**Estimated tokens:** ~${TOKEN_COUNT}"
+            echo ""
+            echo "**Pull Request:** ${PR_URL}"
+            echo ""
+            if [ "$MERGED" == "true" ]; then
+              echo "PR was merged successfully and branch deleted."
+            else
+              echo "**Note:** PR created but not merged. Please merge manually."
+            fi
+          } >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,120 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git pull*)",
+      "Bash(git log*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(gh pr*)",
+      "Bash(gh issue*)",
+      "Bash(ls*)",
+      "Bash(find*)",
+      "Bash(grep*)",
+      "Bash(npm test*)",
+      "Bash(npm run*)",
+      "Bash(pytest*)",
+      "Bash(python -m pytest*)",
+      "Bash(cargo test*)",
+      "Bash(cargo build*)",
+      "Bash(go test*)",
+      "Bash(make test*)",
+      "Bash(docker ps*)",
+      "Bash(docker logs*)",
+      "Bash(kubectl get*)",
+      "Bash(kubectl describe*)",
+      "Read(*)"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/SkillActivationHook/skill-activation-prompt.mjs"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/auto-approve.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/safety-net.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash(git commit*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/commit-context-generator.py"
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-commit.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/format.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/stop.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "defaults": {
+    "model": "claude-opus-4-6",
+    "thinking_enabled": true
+  },
+  "team": {
+    "shared_docs": ".claude/docs.md",
+    "metrics_dir": ".claude/metrics/",
+    "update_frequency": "weekly"
+  }
+}

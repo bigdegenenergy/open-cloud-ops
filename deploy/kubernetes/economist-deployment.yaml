@@ -1,0 +1,112 @@
+# =============================================================================
+# Economist (FinOps Core) - Kubernetes Deployment, Service, and ConfigMap
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: economist-config
+  namespace: open-cloud-ops
+  labels:
+    app: economist
+    app.kubernetes.io/part-of: open-cloud-ops
+data:
+  ECONOMIST_PORT: "8081"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "opencloudops"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: economist
+  namespace: open-cloud-ops
+  labels:
+    app: economist
+    app.kubernetes.io/name: economist
+    app.kubernetes.io/component: finops-core
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: economist
+  template:
+    metadata:
+      labels:
+        app: economist
+        app.kubernetes.io/name: economist
+        app.kubernetes.io/component: finops-core
+        app.kubernetes.io/part-of: open-cloud-ops
+    spec:
+      containers:
+        - name: economist
+          image: open-cloud-ops/economist:latest
+          ports:
+            - containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: economist-config
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oco-redis-credentials
+                  key: password
+                  optional: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "125m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: economist
+  namespace: open-cloud-ops
+  labels:
+    app: economist
+    app.kubernetes.io/name: economist
+    app.kubernetes.io/component: finops-core
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  type: ClusterIP
+  selector:
+    app: economist
+  ports:
+    - port: 8081
+      targetPort: 8081
+      protocol: TCP
+      name: http

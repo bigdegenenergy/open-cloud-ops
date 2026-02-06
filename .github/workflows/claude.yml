@@ -1,0 +1,291 @@
+# Claude Code Assistant - Main @claude Integration
+#
+# This workflow enables Claude Code Web-like functionality through GitHub comments.
+# It uses the official anthropics/claude-code-action@v1 action.
+#
+# Architecture: Two-tier model selection
+# - Haiku: Parses comment intent and handles simple queries
+# - Opus: Handles complex tasks (planning, coding, reviewing)
+#
+# Triggers:
+# - @claude mentions in PR/issue comments
+# - @claude mentions in PR review comments
+# - Issue assignment to 'claude' or 'claude-implement' label
+#
+# Examples:
+# - "@claude review this PR" → Opus (complex)
+# - "@claude implement this feature" → Opus (complex)
+# - "@claude explain how the auth flow works" → Haiku (simple)
+# - "@claude add tests for the user service" → Opus (complex)
+# - "@claude what does this function do?" → Haiku (simple)
+#
+# SECURITY NOTES:
+# - Script Injection Prevention: ALL user inputs (comment bodies, titles, etc.)
+#   MUST be passed to shell scripts via environment variables, never interpolated
+#   directly with ${{ github.event.* }}. See "Classify task complexity" step for
+#   the correct pattern: env var → shell variable → command argument.
+
+name: Claude Code Assistant
+
+on:
+  # Trigger on @claude mentions in comments
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+  # Trigger on PR reviews
+  pull_request_review:
+    types: [submitted]
+
+  # Trigger on issue assignment/label for auto-implementation
+  issues:
+    types: [opened, assigned, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read  # Allows Claude to see workflow/test results
+  id-token: write  # Required for anthropics/claude-code-action OIDC
+
+# Concurrency: Allow only one Claude assistant per issue/PR
+concurrency:
+  group: claude-assistant-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  claude-assistant:
+    name: Claude Assistant
+    # Only run if @claude is mentioned OR it's an automation trigger
+    # Exclude bot users (Copilot, dependabot, etc.) to prevent automated loops
+    if: |
+      github.event.sender.type != 'Bot' && (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+        (github.event_name == 'issues' && github.event.action == 'assigned' && github.event.assignee.login == 'claude') ||
+        (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'claude')
+      )
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check permissions
+        id: check-perms
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Get the actor (commenter/trigger user)
+            const actor = context.actor;
+
+            // Skip bots
+            if (actor.includes('[bot]') || actor.endsWith('-bot')) {
+              core.setOutput('has_access', 'false');
+              console.log(`Skipping bot: ${actor}`);
+              return;
+            }
+
+            // Check author association for comment triggers
+            let authorAssociation = 'NONE';
+            if (context.eventName === 'issue_comment') {
+              authorAssociation = context.payload.comment.author_association;
+            } else if (context.eventName === 'pull_request_review_comment') {
+              authorAssociation = context.payload.comment.author_association;
+            } else if (context.eventName === 'pull_request_review') {
+              authorAssociation = context.payload.review.author_association;
+            } else if (context.eventName === 'issues') {
+              authorAssociation = context.payload.issue.author_association;
+            }
+
+            const allowedAssociations = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+            if (!allowedAssociations.includes(authorAssociation)) {
+              core.setOutput('has_access', 'false');
+              console.log(`Access denied: ${actor} has association '${authorAssociation}'`);
+              return;
+            }
+
+            core.setOutput('has_access', 'true');
+            console.log(`Access granted: ${actor} has association '${authorAssociation}'`);
+
+      - name: Extract comment body
+        if: steps.check-perms.outputs.has_access == 'true'
+        id: extract-comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let commentBody = '';
+
+            if (context.eventName === 'issue_comment') {
+              commentBody = context.payload.comment.body;
+            } else if (context.eventName === 'pull_request_review_comment') {
+              commentBody = context.payload.comment.body;
+            } else if (context.eventName === 'pull_request_review') {
+              commentBody = context.payload.review.body || '';
+            } else if (context.eventName === 'issues') {
+              commentBody = context.payload.issue.body || '';
+            }
+
+            // Remove @claude mention for cleaner parsing
+            commentBody = commentBody.replace(/@claude\s*/gi, '').trim();
+
+            core.setOutput('comment_body', commentBody);
+            console.log(`Comment body: ${commentBody}`);
+
+      - name: Classify task complexity with Haiku
+        if: steps.check-perms.outputs.has_access == 'true'
+        id: classify
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # SECURITY: Pass user input via env var to prevent script injection
+          # NEVER use ${{ github.event.comment.body }} directly in shell scripts
+          COMMENT_BODY: ${{ steps.extract-comment.outputs.comment_body }}
+        run: |
+          # Use Haiku to classify the task complexity
+          RESPONSE=$(curl -s "https://api.anthropic.com/v1/messages" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$(jq -n \
+              --arg comment "$COMMENT_BODY" \
+              '{
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 100,
+                "temperature": 0,
+                "system": "You are a task classifier. Return ONLY valid JSON. No markdown code fences. No preamble. No explanations outside the JSON.\n\nYour response must be a single JSON object starting with { and ending with }.\n\nClassify as \"opus\" (complex) if the task involves:\n- Writing, implementing, or creating code\n- Planning, architecting, or designing\n- Reviewing, auditing, or debugging code\n- Refactoring or fixing bugs\n- Adding tests or features\n- Any task requiring code changes\n\nClassify as \"haiku\" (simple) if the task involves:\n- Explaining or describing existing code\n- Answering questions (what, how, where, why)\n- Summarizing or listing information\n- Finding or showing existing content\n- Quick lookups or clarifications\n\nOutput format: {\"model\": \"opus\" or \"haiku\", \"reason\": \"brief explanation\"}\n\nIMPORTANT: Do not wrap your response in ```json or ``` markers. Return raw JSON only.",
+                "messages": [{"role": "user", "content": ("Classify this request:\n\n" + $comment)}]
+              }')")
+
+          echo "Haiku classification response: $RESPONSE"
+
+          # Extract the text response
+          TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+          if [ -z "$TEXT" ]; then
+            echo "Failed to get classification, defaulting to opus"
+            echo "selected_model=claude-opus-4-6" >> $GITHUB_OUTPUT
+            echo "model_reason=Classification failed, using Opus as fallback" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Parse the JSON (extract JSON object if wrapped in markdown or text)
+          # First try to extract a JSON object from the text using grep
+          JSON_MATCH=$(echo "$TEXT" | grep -oP '\{[^{}]*"model"[^{}]*\}' || echo "$TEXT")
+          # Remove any remaining markdown fences
+          CLEAN_TEXT=$(echo "$JSON_MATCH" | sed 's/```json//g' | sed 's/```//g' | tr -d '\n')
+          MODEL_CHOICE=$(echo "$CLEAN_TEXT" | jq -r '.model // "opus"')
+          REASON=$(echo "$CLEAN_TEXT" | jq -r '.reason // "No reason provided"')
+
+          echo "Classification: $MODEL_CHOICE"
+          echo "Reason: $REASON"
+
+          if [ "$MODEL_CHOICE" = "haiku" ]; then
+            echo "selected_model=claude-haiku-4-5-20251001" >> $GITHUB_OUTPUT
+          else
+            echo "selected_model=claude-opus-4-6" >> $GITHUB_OUTPUT
+          fi
+          echo "model_reason=$REASON" >> $GITHUB_OUTPUT
+
+      - name: Checkout code
+        if: steps.check-perms.outputs.has_access == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better context
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Generate MCP config
+        if: steps.check-perms.outputs.has_access == 'true'
+        id: mcp-config
+        env:
+          # SECURITY: Pass secrets via env vars to avoid shell injection and ensure
+          # proper escaping when generating JSON config file
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        run: |
+          # Generate MCP config file at runtime with proper JSON escaping
+          # This avoids fragile inline JSON with interpolated secrets
+          MCP_CONFIG_FILE="${RUNNER_TEMP}/mcp-config.json"
+
+          # Use jq for safe JSON generation with proper escaping of special characters
+          #
+          # SECURITY: The "fetch" MCP server is DISABLED by default.
+          # Enabling it allows Claude to make arbitrary HTTP requests, which creates
+          # SSRF (Server-Side Request Forgery) risks in CI/CD environments:
+          # - Access to cloud metadata endpoints (169.254.169.254)
+          # - Access to internal network services
+          # - Potential credential theft from runner-accessible endpoints
+          #
+          # Only enable the fetch server if your CI runner is strictly network-isolated
+          # from internal resources and cloud metadata services.
+          #
+          jq -n \
+            --arg brave_key "$BRAVE_API_KEY" \
+            '{
+              "mcpServers": {
+                "brave-search": {
+                  "command": "npx",
+                  "args": ["-y", "@modelcontextprotocol/server-brave-search@0.6.2"],
+                  "env": {
+                    "BRAVE_API_KEY": $brave_key
+                  }
+                }
+              }
+            }' > "$MCP_CONFIG_FILE"
+
+          echo "mcp_config_path=$MCP_CONFIG_FILE" >> $GITHUB_OUTPUT
+          echo "Generated MCP config at: $MCP_CONFIG_FILE"
+
+      - name: Run Claude Code Action
+        if: steps.check-perms.outputs.has_access == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Use GH_TOKEN for git operations (push, create branches, etc.)
+          github_token: ${{ secrets.GH_TOKEN }}
+
+          # CLI arguments for Claude Code
+          # - MCP config generated at runtime (avoids fragile inline JSON with secrets)
+          # - Model selected by Haiku classifier
+          claude_args: |
+            --max-turns 50
+            --model ${{ steps.classify.outputs.selected_model }}
+            --mcp-config ${{ steps.mcp-config.outputs.mcp_config_path }}
+
+      - name: Post model selection info (debug)
+        if: steps.check-perms.outputs.has_access == 'true' && github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const model = '${{ steps.classify.outputs.selected_model }}';
+            const reason = '${{ steps.classify.outputs.model_reason }}';
+            const isOpus = model.includes('opus');
+
+            // Only post debug info if you want visibility into model selection
+            // Comment out this step in production if you don't want the extra comment
+            console.log(`Selected model: ${model}`);
+            console.log(`Reason: ${reason}`);
+
+            // Optionally post a small indicator (uncomment to enable)
+            // const emoji = isOpus ? '🧠' : '⚡';
+            // const modelName = isOpus ? 'Opus' : 'Haiku';
+            // await github.rest.issues.createComment({
+            //   owner: context.repo.owner,
+            //   repo: context.repo.repo,
+            //   issue_number: context.payload.issue.number,
+            //   body: `${emoji} Using **${modelName}** for this request.\n\n_Reason: ${reason}_`
+            // });
+
+      - name: Post access denied comment
+        if: steps.check-perms.outputs.has_access == 'false' && github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const actor = context.actor;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `@${actor} Sorry, only repository collaborators can trigger Claude Code assistant.`
+            });

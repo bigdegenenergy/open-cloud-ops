@@ -1,0 +1,25 @@
+# =============================================================================
+# Economist (FinOps Core) - Python Docker Build
+# =============================================================================
+# Single-stage build for the FastAPI application.
+# =============================================================================
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies first for better layer caching
+COPY economist/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create non-root user
+RUN useradd -r -u 1001 appuser
+
+# Copy application source
+COPY economist/ .
+
+USER appuser
+
+EXPOSE 8081
+
+CMD ["python", "cmd/main.py"]

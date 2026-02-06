@@ -1,0 +1,156 @@
+# =============================================================================
+# PostgreSQL + TimescaleDB - Kubernetes StatefulSet, Service, and ConfigMap
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: open-cloud-ops
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: open-cloud-ops
+data:
+  # The init.sql content is loaded from the deploy/docker/init.sql file.
+  # In production, use: kubectl create configmap postgres-init-sql --from-file=init.sql=deploy/docker/init.sql -n open-cloud-ops
+  init.sql: |
+    -- This ConfigMap should be created from the init.sql file:
+    --   kubectl create configmap postgres-init-sql \
+    --     --from-file=init.sql=deploy/docker/init.sql \
+    --     -n open-cloud-ops --dry-run=client -o yaml | kubectl apply -f -
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: open-cloud-ops
+  labels:
+    app: postgres
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: open-cloud-ops
+    spec:
+      initContainers:
+        - name: init-db
+          image: timescale/timescaledb:latest-pg16
+          command: ["sh", "-c"]
+          args:
+            - |
+              # Copy init SQL to the docker-entrypoint-initdb.d directory
+              # so it runs on first database initialization.
+              cp /init-scripts/init.sql /docker-entrypoint-initdb.d/init.sql
+          volumeMounts:
+            - name: init-scripts
+              mountPath: /init-scripts
+              readOnly: true
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+      containers:
+        - name: postgres
+          image: timescale/timescaledb:latest-pg16
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+              name: postgresql
+          env:
+            - name: POSTGRES_DB
+              value: "opencloudops"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - opencloudops
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - opencloudops
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: init-scripts
+          configMap:
+            name: postgres-init-sql
+        - name: initdb
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+        labels:
+          app: postgres
+          app.kubernetes.io/part-of: open-cloud-ops
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: open-cloud-ops
+  labels:
+    app: postgres
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgresql

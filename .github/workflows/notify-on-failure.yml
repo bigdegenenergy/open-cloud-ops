@@ -1,0 +1,131 @@
+name: Notify on Failure
+
+on:
+  workflow_run:
+    workflows: ["CI", "Security Scan"]
+    types:
+      - completed
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'failure'
+    steps:
+      - name: Send Slack Notification
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          # Use jq in a previous step to construct payload safely
+          # For now, the Slack action handles escaping internally
+          payload: |
+            {
+              "attachments": [{
+                "color": "#FF0000",
+                "title": "Workflow Failed: ${{ github.event.workflow_run.name }}",
+                "text": "Repository: ${{ github.repository }}\nBranch: ${{ github.event.workflow_run.head_branch }}",
+                "footer": "Claude Code CI"
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Send Telegram Notification
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            # Use jq to safely construct the message with proper escaping
+            MESSAGE=$(jq -rn \
+              --arg workflow "$WORKFLOW_NAME" \
+              --arg repo "$REPOSITORY" \
+              --arg branch "$HEAD_BRANCH" \
+              --arg url "$RUN_URL" \
+              '"🔴 *Workflow Failed*\n\n*Workflow:* " + $workflow + "\n*Repository:* " + $repo + "\n*Branch:* " + $branch + "\n\n[View Run](" + $url + ")"')
+
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg chat_id "$TELEGRAM_CHAT_ID" \
+                --arg text "$MESSAGE" \
+                '{chat_id: $chat_id, parse_mode: "Markdown", text: $text}')"
+          fi
+
+      - name: Send Discord Notification
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            # Use jq to safely construct JSON payload
+            PAYLOAD=$(jq -n \
+              --arg title "Workflow Failed: $WORKFLOW_NAME" \
+              --arg desc "Repository: $REPOSITORY\nBranch: $HEAD_BRANCH" \
+              --arg url "$RUN_URL" \
+              '{embeds: [{title: $title, description: $desc, color: 16711680, url: $url}]}')
+
+            curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD"
+          fi
+
+      - name: Send ntfy Notification
+        continue-on-error: true
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          if [ -n "$NTFY_TOPIC" ]; then
+            SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+            curl -s -X POST "${SERVER}/${NTFY_TOPIC}" \
+              -H "Title: Workflow Failed: ${WORKFLOW_NAME}" \
+              -H "Priority: 5" \
+              -H "Tags: x" \
+              -H "Click: ${RUN_URL}" \
+              -d "Repository: ${REPOSITORY} | Branch: ${HEAD_BRANCH}"
+          fi
+
+      - name: Send Custom Webhook
+        continue-on-error: true
+        env:
+          CUSTOM_WEBHOOK_URL: ${{ secrets.CUSTOM_WEBHOOK_URL }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          if [ -n "$CUSTOM_WEBHOOK_URL" ]; then
+            # Use jq to safely construct JSON payload
+            PAYLOAD=$(jq -n \
+              --arg event "workflow_failed" \
+              --arg workflow "$WORKFLOW_NAME" \
+              --arg repo "$REPOSITORY" \
+              --arg branch "$HEAD_BRANCH" \
+              --arg url "$RUN_URL" \
+              '{event: $event, workflow: $workflow, repository: $repo, branch: $branch, url: $url}')
+
+            curl -s -X POST "$CUSTOM_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD"
+          fi
+
+      - name: Notification Complete
+        run: echo "Notification job completed"
