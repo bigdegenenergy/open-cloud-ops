@@ -373,15 +373,17 @@ func jsonToInt64(v interface{}) int64 {
 
 // copyRequestHeaders copies relevant headers from the client request to the
 // upstream proxy request. It passes through authentication headers and content-type
-// but strips Cerebra-specific headers (X-Agent-ID, X-Team-ID, X-Org-ID).
+// but strips Cerebra-specific tracking headers (X-Agent-ID, X-Team-ID, X-Org-ID).
+// The client's Authorization and provider-specific auth headers (e.g., x-api-key
+// for Anthropic) are preserved so that upstream providers receive valid credentials.
 func copyRequestHeaders(src *http.Request, dst *http.Request, provider Provider) {
 	// Copy standard headers
 	for key, values := range src.Header {
 		lowerKey := strings.ToLower(key)
 
-		// Skip hop-by-hop headers and Cerebra-specific tracking headers
+		// Skip hop-by-hop headers and Cerebra-specific tracking headers only
 		if lowerKey == "x-agent-id" || lowerKey == "x-team-id" || lowerKey == "x-org-id" ||
-			lowerKey == "x-api-key" || lowerKey == "host" || lowerKey == "connection" {
+			lowerKey == "host" || lowerKey == "connection" {
 			continue
 		}
 

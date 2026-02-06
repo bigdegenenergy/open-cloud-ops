@@ -3,12 +3,14 @@
 package middleware
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bigdegenenergy/open-cloud-ops/cerebra/pkg/cache"
 )
@@ -129,10 +131,10 @@ func RateLimitMiddleware(c *cache.Cache, maxRequests int64, window time.Duration
 	}
 }
 
-// AuthMiddleware returns a Gin middleware handler that validates the X-API-Key header.
-// If no key is provided or the key is invalid, the request is rejected with 401.
-// In production, this would validate against a database or auth service.
-func AuthMiddleware() gin.HandlerFunc {
+// AuthMiddleware returns a Gin middleware handler that validates the X-API-Key header
+// against the organizations table in the database. Keys that are not found in the
+// database are rejected. Results are cached in Redis to avoid repeated DB lookups.
+func AuthMiddleware(pool *pgxpool.Pool, redisCache *cache.Cache) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-API-Key")
 
@@ -153,7 +155,7 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Basic validation: key must be at least 16 characters
+		// Format validation
 		if len(apiKey) < 16 {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error":   "unauthorized",
@@ -163,9 +165,52 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Store the validated API key in the context for downstream handlers
-		c.Set("api_key", apiKey)
+		// Check Redis cache first for previously validated keys
+		if redisCache != nil {
+			valid, err := redisCache.Get(c.Request.Context(), "apikey:"+apiKey)
+			if err == nil && valid != "" {
+				c.Set("api_key", apiKey)
+				c.Next()
+				return
+			}
+		}
 
+		// Validate against the database
+		if pool != nil {
+			var orgID string
+			err := pool.QueryRow(
+				c.Request.Context(),
+				`SELECT id FROM organizations WHERE id = $1 LIMIT 1`,
+				apiKey,
+			).Scan(&orgID)
+
+			if err != nil {
+				// Also check the agents table as a fallback
+				err = pool.QueryRow(
+					c.Request.Context(),
+					`SELECT id FROM agents WHERE id = $1 LIMIT 1`,
+					apiKey,
+				).Scan(&orgID)
+			}
+
+			if err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"error":   "unauthorized",
+					"message": "Invalid API key.",
+				})
+				c.Abort()
+				return
+			}
+
+			// Cache the validated key in Redis for 5 minutes
+			if redisCache != nil {
+				ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+				_ = redisCache.Set(ctx, "apikey:"+apiKey, "1", 5*time.Minute)
+				cancel()
+			}
+		}
+
+		c.Set("api_key", apiKey)
 		c.Next()
 	}
 }

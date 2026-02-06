@@ -103,7 +103,7 @@ def _seed_costs(session, count: int = 30, daily_cost: float = 10.0):
                 usage_quantity=100.0,
                 usage_unit="hours",
                 region="us-east-1",
-                account_id="123456789012",
+                account_id="test-acct-0001",
                 tags={"env": "prod"},
                 date=today - timedelta(days=i),
             )

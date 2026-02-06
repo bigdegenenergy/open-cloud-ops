@@ -113,7 +113,7 @@ func (db *DB) initSchema(ctx context.Context) error {
 		entity_id   TEXT NOT NULL,
 		limit_usd   DOUBLE PRECISION NOT NULL DEFAULT 0,
 		spent_usd   DOUBLE PRECISION NOT NULL DEFAULT 0,
-		period      BIGINT NOT NULL DEFAULT 2592000000000000,
+		period      INTERVAL NOT NULL DEFAULT INTERVAL '30 days',
 		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		UNIQUE(scope, entity_id)

@@ -110,7 +110,7 @@ func main() {
 
 	// API v1 group with auth and rate limiting
 	v1 := engine.Group("/v1")
-	v1.Use(middleware.AuthMiddleware())
+	v1.Use(middleware.AuthMiddleware(db.Pool, redisCache))
 	v1.Use(middleware.RateLimitMiddleware(redisCache, 100, 1*time.Minute))
 
 	// Proxy routes - forward requests to LLM providers

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -55,13 +56,13 @@ type Budget struct {
 
 // BudgetStatus represents the current state of a budget for API responses.
 type BudgetStatus struct {
-	Scope       BudgetScope `json:"scope"`
-	EntityID    string      `json:"entity_id"`
-	LimitUSD    float64     `json:"limit_usd"`
-	SpentUSD    float64     `json:"spent_usd"`
-	RemainingUSD float64    `json:"remaining_usd"`
-	UsagePercent float64    `json:"usage_percent"`
-	IsExhausted bool        `json:"is_exhausted"`
+	Scope        BudgetScope `json:"scope"`
+	EntityID     string      `json:"entity_id"`
+	LimitUSD     float64     `json:"limit_usd"`
+	SpentUSD     float64     `json:"spent_usd"`
+	RemainingUSD float64     `json:"remaining_usd"`
+	UsagePercent float64     `json:"usage_percent"`
+	IsExhausted  bool        `json:"is_exhausted"`
 }
 
 // Enforcer manages budget checks and enforcement.
@@ -69,6 +70,7 @@ type Enforcer struct {
 	pool            *pgxpool.Pool
 	cache           *cache.Cache
 	alertThresholds []AlertThreshold
+	alertsMu        sync.Mutex // protects alertsSent
 	// alertsSent tracks which alert thresholds have already been fired
 	// to avoid duplicate notifications. Key: "scope:entityID:threshold"
 	alertsSent map[string]bool
@@ -231,7 +233,9 @@ func (e *Enforcer) ResetBudgets() error {
 	}
 
 	// Clear sent alerts so they can fire again in the new period
+	e.alertsMu.Lock()
 	e.alertsSent = make(map[string]bool)
+	e.alertsMu.Unlock()
 
 	log.Println("budget: all budgets reset for new billing period")
 	return nil
@@ -319,6 +323,9 @@ func (e *Enforcer) checkAlertThresholds(ctx context.Context, scope BudgetScope, 
 
 	usagePercent := currentSpend / budgetLimit
 
+	e.alertsMu.Lock()
+	defer e.alertsMu.Unlock()
+
 	for _, threshold := range e.alertThresholds {
 		alertKey := fmt.Sprintf("%s:%s:%s", scope, entityID, threshold.Label)
 
@@ -332,9 +339,6 @@ func (e *Enforcer) checkAlertThresholds(ctx context.Context, scope BudgetScope, 
 
 			log.Printf("budget: [%s] %s/%s has reached %s of budget ($%.2f / $%.2f)",
 				severity, scope, entityID, threshold.Label, currentSpend, budgetLimit)
-
-			// In production, this would trigger notifications (email, Slack, webhook, etc.)
-			// For now, we log the alert and record it.
 		}
 	}
 }

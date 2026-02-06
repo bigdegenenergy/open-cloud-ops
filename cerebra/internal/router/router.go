@@ -10,6 +10,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/bigdegenenergy/open-cloud-ops/cerebra/pkg/models"
 )
@@ -53,14 +54,14 @@ type ModelInfo struct {
 
 // RouteRequest contains the information needed to make a routing decision.
 type RouteRequest struct {
-	OriginalModel   string             // The model originally requested (may be empty for auto-routing)
+	OriginalModel    string             // The model originally requested (may be empty for auto-routing)
 	OriginalProvider models.LLMProvider // The provider originally requested (may be empty)
-	InputText       string             // The input text/prompt for complexity analysis
-	HasSystemPrompt bool               // Whether the request includes a system prompt
-	MaxBudgetUSD    float64            // Maximum budget available for this request
-	PreferredTier   ModelTier          // Optional preferred tier
-	AgentID         string             // Agent making the request
-	TeamID          string             // Team the agent belongs to
+	InputText        string             // The input text/prompt for complexity analysis
+	HasSystemPrompt  bool               // Whether the request includes a system prompt
+	MaxBudgetUSD     float64            // Maximum budget available for this request
+	PreferredTier    ModelTier          // Optional preferred tier
+	AgentID          string             // Agent making the request
+	TeamID           string             // Team the agent belongs to
 }
 
 // RouteResult contains the routing decision.
@@ -85,18 +86,19 @@ const (
 
 // QualityMetrics tracks runtime quality data for models.
 type QualityMetrics struct {
-	SuccessRate   float64
-	AvgLatencyMs  float64
-	ErrorRate     float64
-	RequestCount  int64
+	SuccessRate  float64
+	AvgLatencyMs float64
+	ErrorRate    float64
+	RequestCount int64
 }
 
 // Router manages the intelligent routing of LLM requests.
 type Router struct {
 	Strategy      RoutingStrategy
-	modelRegistry map[string]ModelInfo            // keyed by "provider:model"
-	pricing       map[string]models.ModelPricing  // keyed by "provider:model"
-	metrics       map[string]*QualityMetrics      // keyed by "provider:model"
+	modelRegistry map[string]ModelInfo           // keyed by "provider:model"
+	pricing       map[string]models.ModelPricing // keyed by "provider:model"
+	mu            sync.RWMutex                   // protects metrics map
+	metrics       map[string]*QualityMetrics     // keyed by "provider:model"
 }
 
 // NewRouter creates a new Router with the specified strategy and pricing data.
@@ -426,12 +428,14 @@ func (r *Router) selectAdaptive(candidates []ModelInfo, complexity ComplexityLev
 			(qualityWeight * normalizedQuality) +
 			(latencyWeight * normalizedLatency)
 
-		// Check runtime metrics if available
+		// Check runtime metrics if available (read lock for thread safety)
 		key := string(c.Provider) + ":" + c.Model
+		r.mu.RLock()
 		if metrics, ok := r.metrics[key]; ok {
 			// Penalize models with high error rates
 			score *= (1.0 - metrics.ErrorRate)
 		}
+		r.mu.RUnlock()
 
 		if score > bestScore {
 			bestScore = score
@@ -444,8 +448,12 @@ func (r *Router) selectAdaptive(candidates []ModelInfo, complexity ComplexityLev
 
 // UpdateMetrics updates the runtime quality metrics for a model.
 // This should be called after each request to refine routing decisions.
+// It is safe for concurrent use.
 func (r *Router) UpdateMetrics(provider models.LLMProvider, model string, latencyMs int64, success bool) {
 	key := string(provider) + ":" + model
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	metrics, ok := r.metrics[key]
 	if !ok {
