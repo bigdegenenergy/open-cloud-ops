@@ -191,35 +191,42 @@ func AuthMiddleware(pool *pgxpool.Pool, redisCache *cache.Cache) gin.HandlerFunc
 		}
 
 		// Validate against the api_keys table
-		if pool != nil {
-			var entityID, storedHash string
-			err := pool.QueryRow(
-				c.Request.Context(),
-				`SELECT entity_id, key_hash FROM api_keys
-				 WHERE key_prefix = $1 AND revoked = false
-				 LIMIT 1`,
-				apiKey[:8],
-			).Scan(&entityID, &storedHash)
-
-			if err != nil || subtle.ConstantTimeCompare([]byte(storedHash), []byte(keyHash)) != 1 {
-				c.JSON(http.StatusUnauthorized, gin.H{
-					"error":   "unauthorized",
-					"message": "Invalid API key.",
-				})
-				c.Abort()
-				return
-			}
-
-			// Cache the validated key in Redis for 5 minutes
-			if redisCache != nil {
-				ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-				_ = redisCache.Set(ctx, cacheKey, entityID, 5*time.Minute)
-				cancel()
-			}
-
-			c.Set("api_key", apiKey)
-			c.Set("entity_id", entityID)
+		if pool == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "service_unavailable",
+				"message": "Authentication service is unavailable.",
+			})
+			c.Abort()
+			return
 		}
+
+		var entityID, storedHash string
+		err := pool.QueryRow(
+			c.Request.Context(),
+			`SELECT entity_id, key_hash FROM api_keys
+			 WHERE key_prefix = $1 AND revoked = false
+			 LIMIT 1`,
+			apiKey[:8],
+		).Scan(&entityID, &storedHash)
+
+		if err != nil || subtle.ConstantTimeCompare([]byte(storedHash), []byte(keyHash)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": "Invalid API key.",
+			})
+			c.Abort()
+			return
+		}
+
+		// Cache the validated key in Redis for 5 minutes
+		if redisCache != nil {
+			ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+			_ = redisCache.Set(ctx, cacheKey, entityID, 5*time.Minute)
+			cancel()
+		}
+
+		c.Set("api_key", apiKey)
+		c.Set("entity_id", entityID)
 
 		c.Next()
 	}

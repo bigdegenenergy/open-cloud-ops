@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_db: str = "opencloudops"
     postgres_user: str = "oco_user"
-    postgres_password: SecretStr = SecretStr("change_me")
+    postgres_password: SecretStr
 
     # -------------------------------------------------------------------
     # Redis

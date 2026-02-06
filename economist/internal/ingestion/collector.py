@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -89,14 +90,10 @@ class CostCollector:
         all_costs: list[dict[str, Any]] = []
         for name, result in zip(self._providers.keys(), results):
             if isinstance(result, Exception):
-                logger.error(
-                    "Collection from %s failed: %s", name, result
-                )
+                logger.error("Collection from %s failed: %s", name, result)
             elif isinstance(result, list):
                 all_costs.extend(result)
-                logger.info(
-                    "Collected %d records from %s", len(result), name
-                )
+                logger.info("Collected %d records from %s", len(result), name)
 
         return all_costs
 

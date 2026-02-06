@@ -73,7 +73,7 @@ func NewBackupManager(kubeClient KubeClient, storage StorageBackend, storagePath
 			log.Printf("backup: WARNING: AEGIS_BACKUP_ENCRYPTION_KEY must be 64 hex chars (AES-256); encryption disabled")
 		} else {
 			m.encryptionKey = key
-			log.Printf("backup: AES-256-GCM encryption enabled for archives")
+			log.Printf("backup: AES-CTR+HMAC-SHA256 encryption enabled for archives")
 		}
 	}
 

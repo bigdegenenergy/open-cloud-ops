@@ -19,6 +19,7 @@ from sqlalchemy import (
     Float,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     create_engine,
@@ -42,14 +43,12 @@ class CloudCost(Base):
 
     __tablename__ = "cloud_costs"
 
-    id: str = Column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: str = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     provider: str = Column(String(32), nullable=False, index=True)
     service: str = Column(String(128), nullable=False, index=True)
     resource_id: str = Column(String(256), nullable=False)
     resource_name: str = Column(String(256), nullable=True)
-    cost_usd: float = Column(Float, nullable=False)
+    cost_usd = Column(Numeric(14, 6), nullable=False)
     currency: str = Column(String(8), nullable=False, default="USD")
     usage_quantity: float = Column(Float, nullable=True)
     usage_unit: str = Column(String(64), nullable=True)
@@ -81,9 +80,7 @@ class CloudCost(Base):
             "account_id": self.account_id,
             "tags": self.tags,
             "date": self.date.isoformat() if self.date else None,
-            "created_at": (
-                self.created_at.isoformat() if self.created_at else None
-            ),
+            "created_at": (self.created_at.isoformat() if self.created_at else None),
         }
 
 
@@ -92,9 +89,7 @@ class OptimizationRecommendation(Base):
 
     __tablename__ = "optimization_recommendations"
 
-    id: str = Column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: str = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     provider: str = Column(String(32), nullable=False, index=True)
     resource_id: str = Column(String(256), nullable=False)
     resource_type: str = Column(String(128), nullable=False)
@@ -103,9 +98,7 @@ class OptimizationRecommendation(Base):
     description: str = Column(Text, nullable=True)
     estimated_monthly_savings: float = Column(Float, nullable=False, default=0.0)
     confidence: float = Column(Float, nullable=False, default=0.0)
-    status: str = Column(
-        String(32), nullable=False, default="open", index=True
-    )
+    status: str = Column(String(32), nullable=False, default="open", index=True)
     created_at: datetime = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -123,12 +116,8 @@ class OptimizationRecommendation(Base):
             "estimated_monthly_savings": self.estimated_monthly_savings,
             "confidence": self.confidence,
             "status": self.status,
-            "created_at": (
-                self.created_at.isoformat() if self.created_at else None
-            ),
-            "resolved_at": (
-                self.resolved_at.isoformat() if self.resolved_at else None
-            ),
+            "created_at": (self.created_at.isoformat() if self.created_at else None),
+            "resolved_at": (self.resolved_at.isoformat() if self.resolved_at else None),
         }
 
 
@@ -137,16 +126,12 @@ class GovernancePolicy(Base):
 
     __tablename__ = "governance_policies"
 
-    id: str = Column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: str = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: str = Column(String(256), nullable=False, unique=True)
     description: str = Column(Text, nullable=True)
     policy_type: str = Column(String(64), nullable=False, index=True)
     rules: dict = Column(JSONB, nullable=False)
-    severity: str = Column(
-        String(32), nullable=False, default="warning", index=True
-    )
+    severity: str = Column(String(32), nullable=False, default="warning", index=True)
     enabled: bool = Column(Boolean, nullable=False, default=True)
     created_at: datetime = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -167,12 +152,8 @@ class GovernancePolicy(Base):
             "rules": self.rules,
             "severity": self.severity,
             "enabled": self.enabled,
-            "created_at": (
-                self.created_at.isoformat() if self.created_at else None
-            ),
-            "updated_at": (
-                self.updated_at.isoformat() if self.updated_at else None
-            ),
+            "created_at": (self.created_at.isoformat() if self.created_at else None),
+            "updated_at": (self.updated_at.isoformat() if self.updated_at else None),
         }
 
 
@@ -181,12 +162,8 @@ class PolicyViolation(Base):
 
     __tablename__ = "policy_violations"
 
-    id: str = Column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    policy_id: str = Column(
-        UUID(as_uuid=True), nullable=False, index=True
-    )
+    id: str = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    policy_id: str = Column(UUID(as_uuid=True), nullable=False, index=True)
     resource_id: str = Column(String(256), nullable=False)
     provider: str = Column(String(32), nullable=False, index=True)
     description: str = Column(Text, nullable=True)
@@ -204,12 +181,8 @@ class PolicyViolation(Base):
             "provider": self.provider,
             "description": self.description,
             "severity": self.severity,
-            "detected_at": (
-                self.detected_at.isoformat() if self.detected_at else None
-            ),
-            "resolved_at": (
-                self.resolved_at.isoformat() if self.resolved_at else None
-            ),
+            "detected_at": (self.detected_at.isoformat() if self.detected_at else None),
+            "resolved_at": (self.resolved_at.isoformat() if self.resolved_at else None),
         }
 
 

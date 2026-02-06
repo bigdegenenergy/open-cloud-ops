@@ -203,14 +203,26 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// 6. Read response and extract token usage (bounded to 50MB to prevent OOM from upstream)
-	const maxResponseSize = 50 * 1024 * 1024 // 50MB
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
-		return
-	}
+	// 6. Stream response to client while capturing data for token extraction.
+	// Using io.TeeReader avoids buffering the entire response in memory, which
+	// prevents OOM under high concurrency with large LLM responses.
+	const maxAnalysisCapture int64 = 2 * 1024 * 1024 // 2MB for usage/token extraction
 
+	// Copy response headers before any body writes
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+	c.Writer.WriteHeader(resp.StatusCode)
+
+	// TeeReader: reading from tee simultaneously writes to c.Writer (client)
+	tee := io.TeeReader(resp.Body, c.Writer)
+	var captureBuf bytes.Buffer
+	io.CopyN(&captureBuf, tee, maxAnalysisCapture) //nolint:errcheck // partial read is fine
+	io.Copy(io.Discard, tee)                       //nolint:errcheck // drain remaining to client
+
+	respBody := captureBuf.Bytes()
 	latencyMs := time.Since(startTime).Milliseconds()
 
 	inputTokens, outputTokens, totalTokens := extractTokenUsage(provider, respBody)
@@ -242,7 +254,7 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 		}
 	}
 
-	// 9. Log APIRequest metadata to database (async via goroutine)
+	// 9. Log APIRequest metadata to database (async via buffered channel)
 	apiReq := models.APIRequest{
 		ID:           uuid.New().String(),
 		Provider:     models.LLMProvider(provider),
@@ -266,16 +278,6 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 		h.droppedLogs.Add(1)
 		h.spillToDisk(apiReq)
 	}
-
-	// 10. Return original response to client
-	// Copy response headers
-	for key, values := range resp.Header {
-		for _, value := range values {
-			c.Writer.Header().Add(key, value)
-		}
-	}
-	c.Writer.WriteHeader(resp.StatusCode)
-	c.Writer.Write(respBody)
 }
 
 // extractProviderAndPath parses the request URL to determine the provider and

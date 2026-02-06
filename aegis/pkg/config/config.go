@@ -66,16 +66,17 @@ func Load() (*Config, error) {
 	pgDB := getEnvOrDefault("POSTGRES_DB", "aegis")
 	pgUser := getEnvOrDefault("POSTGRES_USER", "aegis")
 	pgPassword := os.Getenv("POSTGRES_PASSWORD")
+	pgSSLMode := getEnvOrDefault("POSTGRES_SSLMODE", "require")
 
 	if pgPassword == "" {
 		cfg.DatabaseURL = fmt.Sprintf(
-			"postgres://%s@%s:%s/%s?sslmode=disable",
-			pgUser, pgHost, pgPort, pgDB,
+			"postgres://%s@%s:%s/%s?sslmode=%s",
+			pgUser, pgHost, pgPort, pgDB, pgSSLMode,
 		)
 	} else {
 		cfg.DatabaseURL = fmt.Sprintf(
-			"postgres://%s:%s@%s:%s/%s?sslmode=disable",
-			pgUser, pgPassword, pgHost, pgPort, pgDB,
+			"postgres://%s:%s@%s:%s/%s?sslmode=%s",
+			pgUser, pgPassword, pgHost, pgPort, pgDB, pgSSLMode,
 		)
 	}
 
