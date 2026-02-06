@@ -7,6 +7,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"time"
@@ -100,7 +101,7 @@ func APIKeyAuth(pool *pgxpool.Pool) gin.HandlerFunc {
 				apiKey[:8],
 			).Scan(&entityID, &storedHash)
 
-			if err != nil || storedHash != keyHash {
+			if err != nil || subtle.ConstantTimeCompare([]byte(storedHash), []byte(keyHash)) != 1 {
 				c.JSON(http.StatusUnauthorized, gin.H{
 					"error":   "unauthorized",
 					"message": "Invalid API key.",

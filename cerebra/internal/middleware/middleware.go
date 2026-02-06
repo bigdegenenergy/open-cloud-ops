@@ -5,6 +5,7 @@ package middleware
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"log"
 	"net/http"
@@ -200,7 +201,7 @@ func AuthMiddleware(pool *pgxpool.Pool, redisCache *cache.Cache) gin.HandlerFunc
 				apiKey[:8],
 			).Scan(&entityID, &storedHash)
 
-			if err != nil || storedHash != keyHash {
+			if err != nil || subtle.ConstantTimeCompare([]byte(storedHash), []byte(keyHash)) != 1 {
 				c.JSON(http.StatusUnauthorized, gin.H{
 					"error":   "unauthorized",
 					"message": "Invalid API key.",

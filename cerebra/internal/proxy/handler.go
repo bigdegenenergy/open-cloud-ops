@@ -41,17 +41,22 @@ var providerUpstreamURLs = map[Provider]string{
 	ProviderGemini:    "https://generativelanguage.googleapis.com",
 }
 
+// logQueueSize is the buffer size for the async request logging channel.
+const logQueueSize = 4096
+
 // ProxyHandler manages the reverse proxying of LLM API requests.
 type ProxyHandler struct {
 	pool     *pgxpool.Pool
 	enforcer *budget.Enforcer
 	pricing  map[string]models.ModelPricing // keyed by "provider:model"
 	client   *http.Client
+	logCh    chan models.APIRequest
 }
 
 // NewProxyHandler creates a new ProxyHandler instance with all required dependencies.
+// It starts a background worker to drain the log queue; call DrainLogs() before shutdown.
 func NewProxyHandler(pool *pgxpool.Pool, enforcer *budget.Enforcer, pricing map[string]models.ModelPricing) *ProxyHandler {
-	return &ProxyHandler{
+	h := &ProxyHandler{
 		pool:     pool,
 		enforcer: enforcer,
 		pricing:  pricing,
@@ -63,7 +68,27 @@ func NewProxyHandler(pool *pgxpool.Pool, enforcer *budget.Enforcer, pricing map[
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
+		logCh: make(chan models.APIRequest, logQueueSize),
 	}
+
+	// Start a single background worker to process log entries
+	go h.logWorker()
+	return h
+}
+
+// logWorker drains the log channel and writes entries to the database.
+func (h *ProxyHandler) logWorker() {
+	for req := range h.logCh {
+		if h.pool != nil {
+			h.logRequest(context.Background(), req)
+		}
+	}
+}
+
+// DrainLogs closes the log channel and blocks until all pending entries are flushed.
+// Call this during graceful shutdown.
+func (h *ProxyHandler) DrainLogs() {
+	close(h.logCh)
 }
 
 // HandleRequest processes an incoming LLM API request.
@@ -223,8 +248,11 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 		Timestamp:    time.Now(),
 	}
 
-	if h.pool != nil {
-		go h.logRequest(context.Background(), apiReq)
+	// Send to buffered log channel (non-blocking to avoid impacting response latency)
+	select {
+	case h.logCh <- apiReq:
+	default:
+		log.Printf("proxy: log queue full, dropping request log for %s", apiReq.ID)
 	}
 
 	// 10. Return original response to client

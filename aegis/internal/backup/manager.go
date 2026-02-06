@@ -195,8 +195,8 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 		CreatedAt:     now,
 	}
 
-	// Create compressed tar.gz archive
-	archiveData, checksum, err := createArchive(manifest)
+	// Create compressed tar.gz archive (streamed to temp file)
+	archivePath, checksum, err := createArchive(manifest)
 	if err != nil {
 		completedAt := time.Now().UTC()
 		record.Status = models.RecordStatusFailed
@@ -205,12 +205,13 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 		record.DurationMs = completedAt.Sub(record.StartedAt).Milliseconds()
 		return record, fmt.Errorf("backup: %s", record.ErrorMessage)
 	}
+	defer os.Remove(archivePath)
 
 	manifest.Checksum = checksum
 
-	// Store the archive
+	// Store the archive by streaming from temp file (avoids loading into memory)
 	storagePath := fmt.Sprintf("%s/%s/%s.tar.gz", jobID, record.ID, record.ID)
-	if err := m.storage.Write(ctx, storagePath, archiveData); err != nil {
+	if err := m.storage.WriteFromFile(ctx, storagePath, archivePath); err != nil {
 		completedAt := time.Now().UTC()
 		record.Status = models.RecordStatusFailed
 		record.ErrorMessage = fmt.Sprintf("failed to store archive: %v", err)
@@ -408,15 +409,14 @@ func (m *BackupManager) LoadManifest(ctx context.Context, recordID string) (*mod
 }
 
 // createArchive builds a tar.gz archive containing the serialized resources
-// and returns the archive bytes and its SHA-256 checksum.
-// It streams through a temp file to avoid unbounded memory usage on large backups.
-func createArchive(manifest models.BackupManifest) ([]byte, string, error) {
-	// Use a temp file to avoid holding the entire archive in memory
+// and returns the temp file path and its SHA-256 checksum.
+// The caller is responsible for removing the temp file when done.
+func createArchive(manifest models.BackupManifest) (string, string, error) {
 	tmpFile, err := os.CreateTemp("", "aegis-backup-*.tar.gz")
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to create temp file: %w", err)
+		return "", "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	tmpPath := tmpFile.Name()
 	defer tmpFile.Close()
 
 	// Hash writer to compute checksum while writing
@@ -435,7 +435,7 @@ func createArchive(manifest models.BackupManifest) ([]byte, string, error) {
 	for i, resource := range manifest.Resources {
 		resourceData, err := json.MarshalIndent(resource, "", "  ")
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to marshal resource %s/%s: %w", resource.Kind, resource.Name, err)
+			return "", "", fmt.Errorf("failed to marshal resource %s/%s: %w", resource.Kind, resource.Name, err)
 		}
 
 		fileName := fmt.Sprintf("%s/%s_%s_%d.json",
@@ -453,18 +453,18 @@ func createArchive(manifest models.BackupManifest) ([]byte, string, error) {
 		}
 
 		if err := tarWriter.WriteHeader(header); err != nil {
-			return nil, "", fmt.Errorf("failed to write tar header: %w", err)
+			return "", "", fmt.Errorf("failed to write tar header: %w", err)
 		}
 
 		if _, err := tarWriter.Write(resourceData); err != nil {
-			return nil, "", fmt.Errorf("failed to write tar data: %w", err)
+			return "", "", fmt.Errorf("failed to write tar data: %w", err)
 		}
 	}
 
 	// Add manifest as a special file
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to marshal manifest: %w", err)
+		return "", "", fmt.Errorf("failed to marshal manifest: %w", err)
 	}
 
 	manifestHeader := &tar.Header{
@@ -474,33 +474,24 @@ func createArchive(manifest models.BackupManifest) ([]byte, string, error) {
 		ModTime: manifest.CreatedAt,
 	}
 	if err := tarWriter.WriteHeader(manifestHeader); err != nil {
-		return nil, "", fmt.Errorf("failed to write manifest header: %w", err)
+		return "", "", fmt.Errorf("failed to write manifest header: %w", err)
 	}
 	if _, err := tarWriter.Write(manifestData); err != nil {
-		return nil, "", fmt.Errorf("failed to write manifest data: %w", err)
+		return "", "", fmt.Errorf("failed to write manifest data: %w", err)
 	}
 
 	// Close writers in order
 	if err := tarWriter.Close(); err != nil {
-		return nil, "", fmt.Errorf("failed to close tar writer: %w", err)
+		return "", "", fmt.Errorf("failed to close tar writer: %w", err)
 	}
 	if err := gzWriter.Close(); err != nil {
-		return nil, "", fmt.Errorf("failed to close gzip writer: %w", err)
+		return "", "", fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
 	// Calculate checksum from the hash writer
 	checksum := hex.EncodeToString(hashWriter.Sum(nil))
 
-	// Read the archive back from the temp file
-	if _, err := tmpFile.Seek(0, 0); err != nil {
-		return nil, "", fmt.Errorf("failed to seek temp file: %w", err)
-	}
-	archiveData, err := io.ReadAll(tmpFile)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read temp file: %w", err)
-	}
-
-	return archiveData, checksum, nil
+	return tmpPath, checksum, nil
 }
 
 // calculateNextRun computes the next run time from a cron-like schedule string.

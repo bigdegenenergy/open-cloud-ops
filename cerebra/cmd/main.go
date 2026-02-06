@@ -275,6 +275,9 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
+	// Drain any pending log entries before exiting
+	proxyHandler.DrainLogs()
+
 	log.Println("Cerebra LLM Gateway stopped gracefully")
 }
 

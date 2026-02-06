@@ -23,6 +23,10 @@ type StorageBackend interface {
 	// Write stores data at the given path, creating parent directories as needed.
 	Write(ctx context.Context, path string, data []byte) error
 
+	// WriteFromFile streams data from a local file to the given storage path,
+	// avoiding loading the entire file into memory.
+	WriteFromFile(ctx context.Context, storagePath, localFilePath string) error
+
 	// Read retrieves data from the given path.
 	Read(ctx context.Context, path string) ([]byte, error)
 
@@ -124,6 +128,67 @@ func (s *LocalStorage) Write(ctx context.Context, path string, data []byte) erro
 	if closeErr != nil {
 		err = fmt.Errorf("storage: failed to close temp file: %w", closeErr)
 		return err
+	}
+
+	// Atomic rename
+	if err = os.Rename(tmpPath, fullPath); err != nil {
+		return fmt.Errorf("storage: failed to rename temp file: %w", err)
+	}
+
+	return nil
+}
+
+// WriteFromFile streams data from a local file to the storage path without
+// loading the entire file into memory.
+func (s *LocalStorage) WriteFromFile(ctx context.Context, storagePath, localFilePath string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	fullPath, err := s.resolvePath(storagePath)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Create parent directories
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("storage: failed to create directory %q: %w", dir, err)
+	}
+
+	// Open source file
+	src, err := os.Open(localFilePath)
+	if err != nil {
+		return fmt.Errorf("storage: failed to open source file %q: %w", localFilePath, err)
+	}
+	defer src.Close()
+
+	// Write to a temporary file first, then rename for atomicity
+	tmpFile, err := os.CreateTemp(dir, ".aegis-tmp-*")
+	if err != nil {
+		return fmt.Errorf("storage: failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	defer func() {
+		if err != nil {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Stream copy with a fixed buffer (32KB) to avoid loading file into memory
+	buf := make([]byte, 32*1024)
+	if _, err = io.CopyBuffer(tmpFile, src, buf); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("storage: failed to copy data: %w", err)
+	}
+	if err = tmpFile.Close(); err != nil {
+		return fmt.Errorf("storage: failed to close temp file: %w", err)
 	}
 
 	// Atomic rename
@@ -259,10 +324,10 @@ func (s *LocalStorage) Exists(ctx context.Context, path string) (bool, error) {
 // This is provided for future integration and currently returns
 // not-implemented errors for all operations.
 type S3Storage struct {
-	Bucket    string
-	Region    string
-	Prefix    string
-	Endpoint  string // Custom endpoint for S3-compatible stores
+	Bucket   string
+	Region   string
+	Prefix   string
+	Endpoint string // Custom endpoint for S3-compatible stores
 }
 
 // NewS3Storage creates a new S3Storage backend.
@@ -276,6 +341,10 @@ func NewS3Storage(bucket, region, prefix string) *S3Storage {
 }
 
 func (s *S3Storage) Write(ctx context.Context, path string, data []byte) error {
+	return fmt.Errorf("storage: S3 backend not yet implemented")
+}
+
+func (s *S3Storage) WriteFromFile(ctx context.Context, storagePath, localFilePath string) error {
 	return fmt.Errorf("storage: S3 backend not yet implemented")
 }
 
