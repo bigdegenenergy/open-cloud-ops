@@ -113,7 +113,9 @@ export default function SummaryCards() {
     );
   }
 
-  const r = report!;
+  if (!report) return null;
+
+  const r = report;
   const periodLabel =
     r.period_start && r.period_end
       ? `${r.period_start.slice(0, 10)} to ${r.period_end.slice(0, 10)}`
