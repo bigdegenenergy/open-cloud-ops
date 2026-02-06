@@ -5,7 +5,7 @@
 ```json
 {
   "review": {
-    "summary": "This PR introduces the Cerebra MVP and a comprehensive AI agent configuration. While the architecture is ambitious, there are critical issues preventing approval. The frontend dependencies and referenced model versions (React 19.2, Vite 7.3, Claude 4.6) are non-existent or futuristic, rendering the project unbuildable. Security is a major concern: the Cerebra management API appears to lack authentication, allowing public access to sensitive budget and cost data. Budget enforcement fails open (allows requests) if Redis is down, negating its control value. The proxy implementation buffers up to 100MB per request in memory, creating a trivial DoS vector.",
+    "summary": "The PR introduces the Cerebra MVP and a comprehensive AI agent configuration. While the feature set is extensive, there are critical issues regarding dependency integrity (hallucinated future versions in package-lock.json), security defaults (optional admin authentication), and potential correctness bugs in the proxy streaming logic. The extensive agent configuration also introduces security risks regarding arbitrary command execution and SSRF that need mitigation.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
@@ -13,55 +13,46 @@
       "id": 1,
       "severity": "critical",
       "file": "dashboard/package.json",
-      "line": 1,
-      "title": "Invalid/Non-existent Dependency Versions",
-      "description": "The package.json specifies versions that do not exist in public registries: `react: ^19.2.0`, `tailwindcss: ^4.1.18`, `vite: ^7.3.1`, `typescript: ^5.9.3`. Current stable versions are significantly lower (e.g., React 18.x/19-rc, Vite 5.x). This appears to be hallucinated configuration which will cause build failures or supply chain attacks if malicious packages claim these version numbers.",
-      "suggestion": "Downgrade dependencies to currently available stable versions (e.g., React 18.2.0, Vite 5.x, Tailwind 3.4)."
+      "line": 0,
+      "title": "Non-existent/Hallucinated Dependency Versions",
+      "description": "The `package.json` and `package-lock.json` reference versions that do not currently exist on public registries (e.g., `react@19.2`, `vite@7.3`, `tailwind@4.1`). While the PR description suggests a '2026' context, merging this into a real repository today will break builds (`npm install` will fail).",
+      "suggestion": "Downgrade dependencies to currently stable or valid beta/rc versions (e.g., React 18.x or 19.0.0-rc, Vite 5.x/6.x)."
     },
     {
       "id": 2,
-      "severity": "critical",
-      "file": "cerebra/cmd/main.go",
-      "line": 1,
-      "title": "Unauthenticated Management API",
-      "description": "The management endpoints (`/api/v1/costs`, `/api/v1/budgets`, etc.) are exposed via the Gin router without any visible authentication middleware. While the proxy endpoints authenticate against LLM providers, the Cerebra dashboard API allows unauthenticated read/write access to financial data and budget configurations.",
-      "suggestion": "Implement an authentication middleware (e.g., JWT, Basic Auth, or API Key) for the `v1` route group and ensure the frontend client sends credentials."
+      "severity": "important",
+      "file": "cerebra/internal/config/config.go",
+      "line": 0,
+      "title": "Insecure Admin Auth Default",
+      "description": "If `CEREBRA_ADMIN_API_KEY` is not set, the configuration appears to default to empty, effectively disabling authentication for sensitive `/api/v1` management endpoints. Administrative interfaces should fail-secure (deny access) if authentication is not configured.",
+      "suggestion": "Modify `Load()` or the middleware to panic or block requests if `AdminAPIKey` is empty, or require the environment variable to be set for the server to start."
     },
     {
       "id": 3,
       "severity": "important",
-      "file": "cerebra/internal/budget/enforcer.go",
-      "line": 1,
-      "title": "Fail-Open Budget Enforcement",
-      "description": "The budget enforcement logic defaults to `allow=true` if the Redis connection fails or returns an error. While this maximizes availability, it defeats the primary purpose of a 'Budget Enforcer' by allowing potentially unlimited spending during infrastructure outages.",
-      "suggestion": "Change default behavior to fail-closed (block requests) when budget data is inaccessible, or implement a local in-memory fallback cache with strict limits."
+      "file": "cerebra/internal/proxy/handler.go",
+      "line": 0,
+      "title": "Potential Data Loss in Streaming Response",
+      "description": "The streaming logic resets the accumulation buffer when it reaches 1MB. If the upstream provider sends token usage metadata (e.g., OpenAI's `stream_options: {include_usage: true}`) in the final chunk of a stream that exceeds 1MB, the buffer reset may discard the context needed to parse this usage, leading to under-reported costs.",
+      "suggestion": "Implement a rolling buffer or a stream-aware parser that can extract usage metadata without retaining the entire response history, or ensure the final usage chunk is processed independently of the content buffer."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 1,
-      "title": "Potential Denial of Service (OOM)",
-      "description": "The proxy handler sets `maxResponseBodySize` to 100MB and reads the entire body into memory for non-streaming requests using `io.ReadAll`. A small number of concurrent large requests could exhaust the container's memory.",
-      "suggestion": "Reduce `maxResponseBodySize` to a safer default (e.g., 10-20MB) or implement `io.Copy` based streaming even for non-SSE requests to avoid buffering the full response."
+      "file": ".github/workflows/claude.yml",
+      "line": 0,
+      "title": "SSRF Risk via MCP Fetch",
+      "description": "The workflow enables `anthropics/mcp-server-fetch` for the AI agent. This allows the agent to make arbitrary HTTP requests from the GitHub Runner environment. A malicious prompt (e.g., via a PR comment) could exploit this to scan internal networks or exfiltrate secrets available to the runner.",
+      "suggestion": "Disable the `fetch` MCP server or configure it with a strict allowlist of domains required for the agent's operation."
     },
     {
       "id": 5,
-      "severity": "important",
-      "file": "deploy/docker/docker-compose.dev.yml",
-      "line": 1,
-      "title": "Hardcoded Credentials",
-      "description": "The docker-compose file contains hardcoded secrets (`POSTGRES_PASSWORD: oco_dev_password`). While this is a development file, these credentials often leak into production configurations.",
-      "suggestion": "Use an `.env` file for docker-compose variables and ensure it is git-ignored."
-    },
-    {
-      "id": 6,
       "severity": "suggestion",
-      "file": "cerebra/internal/database/database.go",
-      "line": 1,
-      "title": "Raw SQL Schema Management",
-      "description": "Database migrations are handled via raw SQL strings inside Go code (`IF NOT EXISTS`). This is error-prone and lacks version control capabilities found in dedicated migration tools.",
-      "suggestion": "Adopt a proper migration tool like `golang-migrate` or `goose` to manage schema versioning."
+      "file": "cerebra/internal/budget/enforcer.go",
+      "line": 0,
+      "title": "Unpredictable Budget Cycles",
+      "description": "Budgets are implemented using a Redis key with a 30-day TTL. This creates rolling, independent billing cycles for each budget entity based on when the key was first created, rather than a predictable calendar-month cycle. This makes financial reporting and reset alignment difficult.",
+      "suggestion": "Use deterministic time buckets for keys (e.g., `budget:{entity_id}:{YYYY-MM}`) to align budgets with standard billing periods."
     }
   ]
 }
