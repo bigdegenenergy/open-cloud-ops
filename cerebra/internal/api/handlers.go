@@ -151,8 +151,14 @@ func (h *Handlers) CreateBudget(c *gin.Context) {
 	// instead of unconditionally deleting, which would destroy pre-existing data.
 	existing, _ := h.db.GetBudget(c.Request.Context(), req.Scope, req.EntityID)
 
+	// Reuse existing ID on update so the response matches the stored row.
+	budgetID := uuid.New().String()
+	if existing != nil {
+		budgetID = existing.ID
+	}
+
 	b := &models.Budget{
-		ID:         uuid.New().String(),
+		ID:         budgetID,
 		Scope:      req.Scope,
 		EntityID:   req.EntityID,
 		LimitUSD:   req.LimitUSD,

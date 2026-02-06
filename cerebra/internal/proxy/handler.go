@@ -267,7 +267,11 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 		buf := make([]byte, 4096)
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			w.Write(buf[:n])
+			if _, wErr := w.Write(buf[:n]); wErr != nil {
+				// Client disconnected — stop reading upstream to avoid
+				// wasting tokens and keeping the goroutine alive.
+				return false
+			}
 			captured.Write(buf[:n])
 			// When buffer exceeds cap, discard leading events to keep
 			// memory bounded while retaining complete trailing SSE events.
