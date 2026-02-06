@@ -5,63 +5,54 @@
 ```json
 {
   "review": {
-    "summary": "The platform implementation is structurally sound and follows modern Go/Python patterns. Security hardening is evident in the middleware and data handling. The primary remaining concerns involve the bypassability of shell-based AI safety hooks, non-standard cron parsing in the resilience engine, and performance regressions in the AWS cost collector.",
+    "summary": "Massive, high-quality PR implementing three core services and a sophisticated AI orchestration layer. Demonstrates strong adherence to security best practices in most areas (streaming, constant-time auth, decimal math). Key issues include a bypassable command approval regex and a fragile custom cron parser.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
     {
       "id": 1,
-      "severity": "important",
+      "severity": "critical",
       "file": ".claude/hooks/auto-approve.sh",
-      "line": 0,
-      "title": "Bypassable Regex-based Command Validation",
-      "description": "The script uses regex `[[ $CMD =~ [;\\&\\|\\>\\n] ]]` to detect command chaining. This can be bypassed using process substitution ` <(command)`, backticks, or certain shell expansions that don't rely on those specific characters. Since this script auto-approves execution, a bypass allows an agent to run arbitrary code without human oversight.",
-      "suggestion": "Implement a stricter allowlist that parses the command into an argument array and only permits specific binaries with approved flag patterns, rather than relying on character blacklisting."
+      "line": 15,
+      "title": "Bypassable Shell Metacharacter Regex",
+      "description": "The regex `[\\&\\|\\;\\$\\>\\<\\`\\n]` used to detect dangerous shell characters is insufficient. It does not account for process substitution ` <(cmd)`, internal shell variables that don't start with `$`, or advanced redirection techniques. More importantly, it permits the use of characters like parentheses `()` if not immediately preceded by `$`, which can be used for subshells.",
+      "suggestion": "Instead of 'enumerating badness', switch to a strict allow-list of characters for arguments or use a proper shell parser to tokenize the command before approval. At a minimum, include `(`, `)`, `{`, `}`, and `\\` in the forbidden set."
     },
     {
       "id": 2,
       "severity": "important",
       "file": "aegis/internal/backup/manager.go",
-      "line": 0,
-      "title": "Non-standard 'Simplified' Cron Parser",
-      "description": "The `calculateNextRun` function implements a custom, simplified cron parser. Users expecting standard crontab behavior (e.g., day-of-week/month interactions or specific ranges) will find the scheduler behaves unpredictably, potentially leading to missed backups or retention gaps.",
-      "suggestion": "Replace the custom parser with a battle-tested library like `github.com/robfig/cron/v3` to ensure standard compliance and reliability."
+      "line": 450,
+      "title": "Fragile Custom Cron Parser",
+      "description": "The `calculateNextRun` function implements a custom cron parser that only handles basic `* * * * *` fields and a few aliases. It fails to support standard cron features like ranges (1-5), lists (1,2,3), or steps (*/5). This will lead to incorrect scheduling or errors when users attempt to use standard crontabs.",
+      "suggestion": "Replace the custom logic with a robust, well-tested library like `github.com/robfig/cron/v3`. If a custom implementation is required, it must explicitly return an error for unsupported syntax instead of attempting to parse it incorrectly."
     },
     {
       "id": 3,
       "severity": "important",
-      "file": "economist/pkg/cloud/aws.py",
-      "line": 75,
-      "title": "N+1 Network Call Performance Bottleneck",
-      "description": "In the `_get_costs_sync` method, `self._get_account_id()` (which performs a network call to AWS STS) is invoked inside a nested loop for every cost record. For a large account with thousands of line items, this will result in thousands of redundant network calls, likely leading to rate limiting or extreme latency.",
-      "suggestion": "Call `_get_account_id()` once at the start of the collection process and cache the result in a local variable."
+      "file": "cerebra/pkg/config/config.go",
+      "line": 45,
+      "title": "Unescaped Credentials in Connection String",
+      "description": "The PostgreSQL DSN is constructed using `fmt.Sprintf` with raw username and password strings. If a password contains reserved URI characters like `@`, `:`, or `/`, the resulting DSN will be malformed and the connection will fail.",
+      "suggestion": "Use the `net/url` package to construct the DSN. Set the User field using `url.UserPassword(user, pass)` to ensure proper percent-encoding of credentials."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 150,
-      "title": "Hardcoded Spill File Path in Read-Only Environments",
-      "description": "The proxy handler writes a log spill file (`cerebra-log-spill.jsonl`) to the local working directory when the async channel is full. In standard Kubernetes deployments, the container filesystem is often read-only, which will cause the proxy to panic or fail to log usage data entirely.",
-      "suggestion": "Make the spill directory configurable via environment variables (e.g., `CEREBRA_SPILL_PATH`) and default to a location like `/tmp/` or a mounted volume."
+      "file": "economist/pkg/cloud/aws.py",
+      "line": 65,
+      "title": "N+1 Network Calls for AWS Account ID",
+      "description": "The `_get_account_id` method performs a call to `sts.get_caller_identity()` but does not appear to cache the result effectively across the collection lifecycle. In environments with many resources, this results in redundant network latency for every discovery operation.",
+      "suggestion": "Implement a simple memoization pattern or class-level cache for the account ID, as it is immutable for the duration of the provider session."
     },
     {
       "id": 5,
       "severity": "suggestion",
       "file": "aegis/internal/backup/manager.go",
-      "line": 45,
-      "title": "Custom Encrypt-then-MAC Implementation",
-      "description": "The manager uses a manual construction of AES-CTR + HMAC-SHA256. While the implementation appears correct (using constant-time comparison), manual cryptographic constructions are riskier than using standard AEAD (Authenticated Encryption with Associated Data) primitives.",
-      "suggestion": "Use `crypto/cipher.NewGCM` with `AES-256`, which handles the authentication tag and nonce management natively and is typically hardware-accelerated."
-    },
-    {
-      "id": 6,
-      "severity": "suggestion",
-      "file": ".claude/hooks/pre-commit.sh",
-      "line": 0,
-      "title": "PII Scanner False Positives",
-      "description": "The PII scanner uses broad regex for phone numbers and AWS Account IDs. These frequently trigger on version strings, serial numbers, or internal IDs, creating friction in the automated development loop.",
-      "suggestion": "Refine the regex to require specific context (e.g., lookbehind for 'phone' or 'account_id') and implement an exclusion mechanism for known safe patterns."
+      "line": 210,
+      "title": "Potential Disk Exhaustion in /tmp",
+      "description": "The backup manager streams K8s resources to a temporary file in `/tmp` before encrypting and moving them to permanent storage. In containers with small root filesystems or memory-backed `/tmp`, large backups (e.g., many large Secrets/ConfigMaps) could cause disk exhaustion.",
+      "suggestion": "Make the temporary directory path configurable via environment variable (e.g., `AEGIS_TEMP_PATH`) to allow users to mount a dedicated volume for backup staging."
     }
   ]
 }
