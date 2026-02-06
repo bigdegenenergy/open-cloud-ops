@@ -117,8 +117,8 @@ export default function SummaryCards() {
 
   const r = report;
   const periodLabel =
-    r.period_start && r.period_end
-      ? `${r.period_start.slice(0, 10)} to ${r.period_end.slice(0, 10)}`
+    r.from && r.to
+      ? `${r.from.slice(0, 10)} to ${r.to.slice(0, 10)}`
       : "Current period";
 
   return (
@@ -146,7 +146,7 @@ export default function SummaryCards() {
       />
       <Card
         title="Savings"
-        value={formatUsd(r.savings_usd)}
+        value={formatUsd(r.total_savings_usd)}
         subtitle="Via caching & routing"
         accentClass="text-accent-purple"
         icon="%"

@@ -108,15 +108,15 @@ export default function InsightsPanel() {
                         {insight.severity}
                       </span>
                       <span className="text-text-muted text-xs px-1.5 py-0.5 bg-bg-card rounded">
-                        {insight.category}
+                        {insight.type}
                       </span>
                     </div>
                     <p className="text-text-secondary text-sm mb-2">
                       {insight.description}
                     </p>
-                    {insight.recommendation && (
+                    {insight.estimated_saving > 0 && (
                       <div className="text-xs text-text-muted bg-bg-card rounded px-3 py-2">
-                        Recommendation: {insight.recommendation}
+                        Potential saving: ${insight.estimated_saving.toFixed(2)}
                       </div>
                     )}
                     <div className="text-xs text-text-muted mt-2">

@@ -2,25 +2,26 @@ import { useState, useEffect } from "react";
 import { getRecentRequests } from "../api";
 import type { CostRequest } from "../api";
 
-function statusBadge(status: string) {
+function statusBadge(code: number) {
+  const label = String(code);
   const base = "px-2 py-0.5 rounded-full text-xs font-medium";
-  if (status === "success" || status === "ok" || status === "200") {
+  if (code >= 200 && code < 300) {
     return (
       <span className={`${base} bg-accent-green/15 text-accent-green`}>
-        {status}
+        {label}
       </span>
     );
   }
-  if (status === "error" || status === "failed" || status.startsWith("5")) {
+  if (code >= 500) {
     return (
       <span className={`${base} bg-accent-red/15 text-accent-red`}>
-        {status}
+        {label}
       </span>
     );
   }
   return (
     <span className={`${base} bg-accent-amber/15 text-accent-amber`}>
-      {status}
+      {label}
     </span>
   );
 }
@@ -123,7 +124,7 @@ export default function RequestsTable() {
                     {req.provider}
                   </td>
                   <td className="py-2.5 px-2 text-text-secondary">
-                    {req.team}
+                    {req.team_id}
                   </td>
                   <td className="py-2.5 px-2 text-right text-text-secondary tabular-nums">
                     {(req.input_tokens + req.output_tokens).toLocaleString()}
@@ -135,7 +136,7 @@ export default function RequestsTable() {
                     {req.latency_ms.toFixed(0)} ms
                   </td>
                   <td className="py-2.5 px-2 text-center">
-                    {statusBadge(req.status)}
+                    {statusBadge(req.status_code)}
                   </td>
                 </tr>
               ))}

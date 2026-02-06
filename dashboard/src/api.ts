@@ -5,9 +5,13 @@ const BASE = "";
 
 export interface CostSummaryItem {
   dimension: string;
-  key: string;
+  dimension_id: string;
+  dimension_name: string;
   total_cost_usd: number;
-  request_count: number;
+  total_requests: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+  total_savings_usd: number;
 }
 
 export interface CostRequest {
@@ -15,21 +19,30 @@ export interface CostRequest {
   timestamp: string;
   model: string;
   provider: string;
-  team: string;
+  agent_id: string;
+  team_id: string;
+  org_id: string;
   input_tokens: number;
   output_tokens: number;
+  total_tokens: number;
   cost_usd: number;
   latency_ms: number;
-  status: string;
+  status_code: number;
+  was_routed: boolean;
+  original_model: string;
+  routed_model: string;
+  savings_usd: number;
 }
 
 export interface Budget {
+  id: string;
   scope: string;
   entity_id: string;
   limit_usd: number;
   spent_usd: number;
   period_days: number;
-  utilization_pct: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface CreateBudgetPayload {
@@ -41,27 +54,43 @@ export interface CreateBudgetPayload {
 
 export interface Insight {
   id: string;
+  type: string;
   severity: "info" | "warning" | "critical";
-  category: string;
   title: string;
   description: string;
-  recommendation: string;
+  estimated_saving: number;
+  affected_entity: string;
   created_at: string;
+  dismissed: boolean;
 }
 
 export interface ReportSummary {
+  from: string;
+  to: string;
   total_cost_usd: number;
   total_requests: number;
+  total_tokens: number;
   avg_latency_ms: number;
-  savings_usd: number;
-  period_start: string;
-  period_end: string;
+  total_savings_usd: number;
 }
 
 export interface HealthStatus {
   status: string;
+  service: string;
   version: string;
-  uptime_seconds: number;
+}
+
+// Envelope types matching backend responses.
+interface ListEnvelope<T> {
+  count: number;
+  data: T[];
+}
+
+interface CostSummaryEnvelope {
+  dimension: string;
+  from: string;
+  to: string;
+  data: CostSummaryItem[];
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -81,21 +110,28 @@ export function getHealth(): Promise<HealthStatus> {
   return request<HealthStatus>("/health");
 }
 
-export function getCostSummary(
+export async function getCostSummary(
   dimension: "model" | "provider" | "team",
   from: string,
   to: string,
 ): Promise<CostSummaryItem[]> {
   const params = new URLSearchParams({ dimension, from, to });
-  return request<CostSummaryItem[]>(`/api/v1/costs/summary?${params}`);
+  const envelope = await request<CostSummaryEnvelope>(
+    `/api/v1/costs/summary?${params}`,
+  );
+  return envelope.data;
 }
 
-export function getRecentRequests(limit = 50): Promise<CostRequest[]> {
-  return request<CostRequest[]>(`/api/v1/costs/requests?limit=${limit}`);
+export async function getRecentRequests(limit = 50): Promise<CostRequest[]> {
+  const envelope = await request<ListEnvelope<CostRequest>>(
+    `/api/v1/costs/requests?limit=${limit}`,
+  );
+  return envelope.data;
 }
 
-export function getBudgets(): Promise<Budget[]> {
-  return request<Budget[]>("/api/v1/budgets");
+export async function getBudgets(): Promise<Budget[]> {
+  const envelope = await request<ListEnvelope<Budget>>("/api/v1/budgets");
+  return envelope.data;
 }
 
 export function getBudget(scope: string, entityId: string): Promise<Budget> {
@@ -109,8 +145,9 @@ export function createBudget(payload: CreateBudgetPayload): Promise<Budget> {
   });
 }
 
-export function getInsights(): Promise<Insight[]> {
-  return request<Insight[]>("/api/v1/insights");
+export async function getInsights(): Promise<Insight[]> {
+  const envelope = await request<ListEnvelope<Insight>>("/api/v1/insights");
+  return envelope.data;
 }
 
 export function getReport(): Promise<ReportSummary> {

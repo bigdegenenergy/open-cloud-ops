@@ -207,7 +207,8 @@ export default function BudgetPanel() {
       ) : (
         <div className="space-y-3">
           {budgets.map((b) => {
-            const safePct = b.limit_usd > 0 ? b.utilization_pct : 0;
+            const safePct =
+              b.limit_usd > 0 ? (b.spent_usd / b.limit_usd) * 100 : 0;
             const pct = Math.min(safePct, 100);
             return (
               <div

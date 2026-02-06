@@ -22,7 +22,9 @@ class WorkflowEngine:
 
     def load_workflow(self, name):
         """Load a workflow definition by name."""
-        path = self.definitions_dir / f"{name}.yaml"
+        path = (self.definitions_dir / f"{name}.yaml").resolve()
+        if not str(path).startswith(str(self.definitions_dir.resolve())):
+            raise ValueError(f"Invalid workflow name: {name}")
         if not path.exists():
             raise FileNotFoundError(
                 f"Workflow '{name}' not found. "
