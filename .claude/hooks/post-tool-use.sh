@@ -23,7 +23,7 @@ if [[ "$CLAUDE_TOOL_NAME" == "Edit" ]] || [[ "$CLAUDE_TOOL_NAME" == "Write" ]]; 
     fi
     
     # JavaScript/TypeScript files - Prettier
-    if find . -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -newer /tmp/claude_last_run 2>/dev/null | grep -q .; then
+    if find . \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) -newer /tmp/claude_last_run 2>/dev/null | grep -q .; then
         echo "  Formatting JS/TS files with Prettier..."
         npx prettier --write "**/*.{js,ts,jsx,tsx}" 2>/dev/null || true
         npx eslint --fix . 2>/dev/null || true

@@ -175,7 +175,8 @@ func main() {
 		proxyGroup.Use(apiKeyAuth(cfg.ProxyAPIKey))
 		log.Println("Proxy endpoint authentication enabled.")
 	} else {
-		log.Println("WARNING: CEREBRA_PROXY_API_KEY not set. Proxy endpoints are open (intended for private network use).")
+		log.Println("WARNING: CEREBRA_PROXY_API_KEY not set. Proxy endpoints are UNAUTHENTICATED.")
+		log.Println("WARNING: Ensure this service is on a private network or set CEREBRA_PROXY_API_KEY.")
 	}
 	{
 		proxyGroup.Any("/openai/*path", proxyHandler.HandleOpenAI)

@@ -54,7 +54,7 @@ if [ -n "$JS_FILES" ]; then
         # Try ESLint
         if [ -f ".eslintrc.js" ] || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f "eslint.config.js" ] || grep -q "eslint" package.json 2>/dev/null; then
             echo "  → ESLint: Checking JS/TS files..."
-            ESLINT_OUTPUT=$(echo "$JS_FILES" | xargs npx eslint --no-error-on-unmatched-pattern 2>&1) || {
+            ESLINT_OUTPUT=$(echo "$JS_FILES" | xargs -d '\n' --npx eslint --no-error-on-unmatched-pattern 2>&1) || {
                 LINT_ERRORS="${LINT_ERRORS}ESLint errors:\n${ESLINT_OUTPUT}\n\n"
                 EXIT_CODE=2
             }
@@ -67,13 +67,13 @@ PY_FILES=$(echo "$STAGED_FILES" | grep -E '\.py$' || true)
 if [ -n "$PY_FILES" ]; then
     if command -v ruff &> /dev/null; then
         echo "  → Ruff: Checking Python files..."
-        RUFF_OUTPUT=$(echo "$PY_FILES" | xargs ruff check 2>&1) || {
+        RUFF_OUTPUT=$(echo "$PY_FILES" | xargs -d '\n' --ruff check 2>&1) || {
             LINT_ERRORS="${LINT_ERRORS}Ruff errors:\n${RUFF_OUTPUT}\n\n"
             EXIT_CODE=2
         }
     elif command -v flake8 &> /dev/null; then
         echo "  → Flake8: Checking Python files..."
-        FLAKE8_OUTPUT=$(echo "$PY_FILES" | xargs flake8 2>&1) || {
+        FLAKE8_OUTPUT=$(echo "$PY_FILES" | xargs -d '\n' --flake8 2>&1) || {
             LINT_ERRORS="${LINT_ERRORS}Flake8 errors:\n${FLAKE8_OUTPUT}\n\n"
             EXIT_CODE=2
         }
@@ -85,13 +85,13 @@ GO_FILES=$(echo "$STAGED_FILES" | grep -E '\.go$' || true)
 if [ -n "$GO_FILES" ]; then
     if command -v staticcheck &> /dev/null; then
         echo "  → Staticcheck: Checking Go files..."
-        STATICCHECK_OUTPUT=$(echo "$GO_FILES" | xargs staticcheck 2>&1) || {
+        STATICCHECK_OUTPUT=$(echo "$GO_FILES" | xargs -d '\n' --staticcheck 2>&1) || {
             LINT_ERRORS="${LINT_ERRORS}Staticcheck errors:\n${STATICCHECK_OUTPUT}\n\n"
             EXIT_CODE=2
         }
     elif command -v golint &> /dev/null; then
         echo "  → Golint: Checking Go files..."
-        GOLINT_OUTPUT=$(echo "$GO_FILES" | xargs golint 2>&1)
+        GOLINT_OUTPUT=$(echo "$GO_FILES" | xargs -d '\n' --golint 2>&1)
         if [ -n "$GOLINT_OUTPUT" ]; then
             LINT_ERRORS="${LINT_ERRORS}Golint warnings:\n${GOLINT_OUTPUT}\n\n"
             # golint is advisory, don't block
@@ -116,7 +116,7 @@ SH_FILES=$(echo "$STAGED_FILES" | grep -E '\.(sh|bash)$' || true)
 if [ -n "$SH_FILES" ]; then
     if command -v shellcheck &> /dev/null; then
         echo "  → ShellCheck: Checking shell scripts..."
-        SHELLCHECK_OUTPUT=$(echo "$SH_FILES" | xargs shellcheck 2>&1) || {
+        SHELLCHECK_OUTPUT=$(echo "$SH_FILES" | xargs -d '\n' --shellcheck 2>&1) || {
             LINT_ERRORS="${LINT_ERRORS}ShellCheck errors:\n${SHELLCHECK_OUTPUT}\n\n"
             EXIT_CODE=2
         }
@@ -136,7 +136,7 @@ if [ -n "$WEB_FILES" ]; then
     if command -v npx &> /dev/null && [ -f "package.json" ]; then
         if [ -f ".prettierrc" ] || [ -f ".prettierrc.json" ] || [ -f ".prettierrc.js" ] || [ -f "prettier.config.js" ] || grep -q "prettier" package.json 2>/dev/null; then
             echo "  → Prettier: Checking formatting..."
-            PRETTIER_OUTPUT=$(echo "$WEB_FILES" | xargs npx prettier --check 2>&1) || {
+            PRETTIER_OUTPUT=$(echo "$WEB_FILES" | xargs -d '\n' --npx prettier --check 2>&1) || {
                 FORMAT_ERRORS="${FORMAT_ERRORS}Prettier formatting issues:\n${PRETTIER_OUTPUT}\n\n"
                 EXIT_CODE=2
             }
@@ -148,7 +148,7 @@ fi
 if [ -n "$PY_FILES" ]; then
     if command -v black &> /dev/null; then
         echo "  → Black: Checking Python formatting..."
-        BLACK_OUTPUT=$(echo "$PY_FILES" | xargs black --check --quiet 2>&1) || {
+        BLACK_OUTPUT=$(echo "$PY_FILES" | xargs -d '\n' --black --check --quiet 2>&1) || {
             FORMAT_ERRORS="${FORMAT_ERRORS}Black formatting issues (run 'black <file>' to fix):\n$(echo "$PY_FILES" | tr '\n' ' ')\n\n"
             EXIT_CODE=2
         }
@@ -159,7 +159,7 @@ fi
 if [ -n "$GO_FILES" ]; then
     if command -v gofmt &> /dev/null; then
         echo "  → gofmt: Checking Go formatting..."
-        GOFMT_OUTPUT=$(echo "$GO_FILES" | xargs gofmt -l 2>&1)
+        GOFMT_OUTPUT=$(echo "$GO_FILES" | xargs -d '\n' --gofmt -l 2>&1)
         if [ -n "$GOFMT_OUTPUT" ]; then
             FORMAT_ERRORS="${FORMAT_ERRORS}gofmt formatting issues (run 'gofmt -w <file>' to fix):\n${GOFMT_OUTPUT}\n\n"
             EXIT_CODE=2
@@ -171,7 +171,7 @@ fi
 if [ -n "$RS_FILES" ]; then
     if command -v rustfmt &> /dev/null; then
         echo "  → rustfmt: Checking Rust formatting..."
-        RUSTFMT_OUTPUT=$(echo "$RS_FILES" | xargs rustfmt --check 2>&1) || {
+        RUSTFMT_OUTPUT=$(echo "$RS_FILES" | xargs -d '\n' --rustfmt --check 2>&1) || {
             FORMAT_ERRORS="${FORMAT_ERRORS}rustfmt formatting issues (run 'rustfmt <file>' to fix):\n$(echo "$RS_FILES" | tr '\n' ' ')\n\n"
             EXIT_CODE=2
         }
@@ -182,7 +182,7 @@ fi
 if [ -n "$SH_FILES" ]; then
     if command -v shfmt &> /dev/null; then
         echo "  → shfmt: Checking shell script formatting..."
-        SHFMT_OUTPUT=$(echo "$SH_FILES" | xargs shfmt -d 2>&1)
+        SHFMT_OUTPUT=$(echo "$SH_FILES" | xargs -d '\n' --shfmt -d 2>&1)
         if [ -n "$SHFMT_OUTPUT" ]; then
             FORMAT_ERRORS="${FORMAT_ERRORS}shfmt formatting issues (run 'shfmt -w <file>' to fix):\n$(echo "$SH_FILES" | tr '\n' ' ')\n\n"
             EXIT_CODE=2
@@ -253,7 +253,7 @@ echo "🔒 Running security checks..."
 
 # Look for sensitive data patterns (secrets/credentials)
 SENSITIVE_PATTERNS="API_KEY=|SECRET=|PASSWORD=|PRIVATE_KEY|-----BEGIN"
-SENSITIVE_FOUND=$(echo "$STAGED_FILES" | xargs grep -l -E "$SENSITIVE_PATTERNS" 2>/dev/null | grep -v ".example" | grep -v ".template" | head -5)
+SENSITIVE_FOUND=$(echo "$STAGED_FILES" | xargs -d '\n' --grep -l -E "$SENSITIVE_PATTERNS" 2>/dev/null | grep -v ".example" | grep -v ".template" | head -5)
 if [ -n "$SENSITIVE_FOUND" ]; then
     echo "  ⛔ Potential secrets found in:"
     echo "$SENSITIVE_FOUND" | sed 's/^/     /'
@@ -272,7 +272,7 @@ fi
 
 # Check for debugging artifacts
 DEBUG_PATTERNS="console\.log|debugger|print\(.*#.*debug|binding\.pry|import pdb"
-DEBUG_FOUND=$(echo "$STAGED_FILES" | xargs grep -l -E "$DEBUG_PATTERNS" 2>/dev/null | head -5)
+DEBUG_FOUND=$(echo "$STAGED_FILES" | xargs -d '\n' --grep -l -E "$DEBUG_PATTERNS" 2>/dev/null | head -5)
 if [ -n "$DEBUG_FOUND" ]; then
     echo "  ⚠️  Debug statements found in:"
     echo "$DEBUG_FOUND" | sed 's/^/     /'
@@ -299,7 +299,7 @@ if [ -n "$CODE_FILES" ]; then
     # Email addresses (but exclude example.com, test.com, localhost patterns)
     EMAIL_PATTERN='[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     EMAIL_EXCLUDES='example\.com|test\.com|localhost|your-?email|user@|email@|foo@|bar@|noreply@|no-reply@|users\.noreply\.github\.com'
-    EMAIL_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "$EMAIL_PATTERN" 2>/dev/null | while read -r file; do
+    EMAIL_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "$EMAIL_PATTERN" 2>/dev/null | while read -r file; do
         if grep -E "$EMAIL_PATTERN" "$file" 2>/dev/null | grep -vE "$EMAIL_EXCLUDES" | grep -qE "$EMAIL_PATTERN"; then
             echo "$file"
         fi
@@ -312,7 +312,7 @@ if [ -n "$CODE_FILES" ]; then
 
     # Phone numbers (various formats: +1-xxx-xxx-xxxx, (xxx) xxx-xxxx, xxx.xxx.xxxx)
     PHONE_PATTERN='\+?1?[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}'
-    PHONE_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "$PHONE_PATTERN" 2>/dev/null | head -3)
+    PHONE_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "$PHONE_PATTERN" 2>/dev/null | head -3)
     if [ -n "$PHONE_FOUND" ]; then
         PII_ERRORS="${PII_ERRORS}  ⛔ Phone numbers found in:\n"
         PII_ERRORS="${PII_ERRORS}$(echo "$PHONE_FOUND" | sed 's/^/     /')\n"
@@ -321,7 +321,7 @@ if [ -n "$CODE_FILES" ]; then
 
     # Social Security Numbers (xxx-xx-xxxx format)
     SSN_PATTERN='[0-9]{3}-[0-9]{2}-[0-9]{4}'
-    SSN_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "$SSN_PATTERN" 2>/dev/null | head -3)
+    SSN_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "$SSN_PATTERN" 2>/dev/null | head -3)
     if [ -n "$SSN_FOUND" ]; then
         PII_ERRORS="${PII_ERRORS}  ⛔ SSN patterns found in:\n"
         PII_ERRORS="${PII_ERRORS}$(echo "$SSN_FOUND" | sed 's/^/     /')\n"
@@ -331,7 +331,7 @@ if [ -n "$CODE_FILES" ]; then
     # Credit card numbers (basic patterns for major card types)
     # Visa: 4xxx, Mastercard: 5xxx, Amex: 3xxx, etc.
     CC_PATTERN='[3-6][0-9]{3}[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}'
-    CC_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "$CC_PATTERN" 2>/dev/null | head -3)
+    CC_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "$CC_PATTERN" 2>/dev/null | head -3)
     if [ -n "$CC_FOUND" ]; then
         PII_ERRORS="${PII_ERRORS}  ⛔ Credit card patterns found in:\n"
         PII_ERRORS="${PII_ERRORS}$(echo "$CC_FOUND" | sed 's/^/     /')\n"
@@ -341,7 +341,7 @@ if [ -n "$CODE_FILES" ]; then
     # IP addresses (but exclude common private/localhost ranges in certain contexts)
     IP_PATTERN='[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
     IP_EXCLUDES='127\.0\.0\.1|0\.0\.0\.0|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|localhost'
-    IP_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "$IP_PATTERN" 2>/dev/null | while read -r file; do
+    IP_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "$IP_PATTERN" 2>/dev/null | while read -r file; do
         if grep -E "$IP_PATTERN" "$file" 2>/dev/null | grep -vE "$IP_EXCLUDES" | grep -qE "$IP_PATTERN"; then
             echo "$file"
         fi
@@ -355,7 +355,7 @@ if [ -n "$CODE_FILES" ]; then
     # AWS Account IDs (12 digits)
     AWS_PATTERN='[0-9]{12}'
     # Only check in specific contexts to reduce false positives
-    AWS_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "(aws|arn:|account).{0,20}$AWS_PATTERN" 2>/dev/null | head -3)
+    AWS_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "(aws|arn:|account).{0,20}$AWS_PATTERN" 2>/dev/null | head -3)
     if [ -n "$AWS_FOUND" ]; then
         PII_ERRORS="${PII_ERRORS}  ⛔ AWS Account ID patterns found in:\n"
         PII_ERRORS="${PII_ERRORS}$(echo "$AWS_FOUND" | sed 's/^/     /')\n"
@@ -364,7 +364,7 @@ if [ -n "$CODE_FILES" ]; then
 
     # Physical addresses (basic pattern: number + street name)
     ADDR_PATTERN='[0-9]+\s+(N\.?|S\.?|E\.?|W\.?|North|South|East|West)?\s*[A-Z][a-z]+\s+(St\.?|Street|Ave\.?|Avenue|Rd\.?|Road|Blvd\.?|Boulevard|Dr\.?|Drive|Ln\.?|Lane|Way|Ct\.?|Court)'
-    ADDR_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "$ADDR_PATTERN" 2>/dev/null | grep -v "test" | grep -v "mock" | grep -v "example" | head -3)
+    ADDR_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "$ADDR_PATTERN" 2>/dev/null | grep -v "test" | grep -v "mock" | grep -v "example" | head -3)
     if [ -n "$ADDR_FOUND" ]; then
         PII_ERRORS="${PII_ERRORS}  ⛔ Physical addresses found in:\n"
         PII_ERRORS="${PII_ERRORS}$(echo "$ADDR_FOUND" | sed 's/^/     /')\n"
@@ -376,7 +376,7 @@ if [ -n "$CODE_FILES" ]; then
     NAME_CONTEXT='(name|author|user|contact|owner|created[_ ]?by|assigned[_ ]?to|submitted[_ ]?by)\s*[:=]?\s*'
     NAME_PATTERN="[A-Z][a-z]+\s+[A-Z][a-z]+"
     NAME_EXCLUDES='Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name'
-    NAME_FOUND=$(echo "$CODE_FILES" | xargs grep -lE "${NAME_CONTEXT}${NAME_PATTERN}" 2>/dev/null | while read -r file; do
+    NAME_FOUND=$(echo "$CODE_FILES" | xargs -d '\n' --grep -lE "${NAME_CONTEXT}${NAME_PATTERN}" 2>/dev/null | while read -r file; do
         if grep -E "${NAME_CONTEXT}${NAME_PATTERN}" "$file" 2>/dev/null | grep -vE "$NAME_EXCLUDES" | grep -qE "${NAME_CONTEXT}${NAME_PATTERN}"; then
             echo "$file"
         fi

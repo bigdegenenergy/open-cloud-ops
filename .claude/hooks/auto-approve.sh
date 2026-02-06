@@ -2,9 +2,6 @@
 # PermissionRequest Hook - Auto-Approve Trusted Commands
 # Eliminates approval friction for commands you already trust.
 #
-# This hook intercepts permission requests and automatically approves
-# safe, well-known commands. No more clicking "approve" for npm test.
-#
 # Output: JSON with decision field
 #   {"decision": "approve"} - Auto-approve the command
 #   {"decision": "deny", "message": "reason"} - Block the command
@@ -54,18 +51,12 @@ contains_shell_metacharacters() {
 # TRUSTED BASH COMMANDS - AUTO APPROVE
 # ============================================
 #
-# SECURITY NOTE: These patterns use prefix matching (^command).
-# This means "npm test --some-flag" will also be approved.
-# This is intentional to allow legitimate flags like --watch, --coverage.
-# The shell metacharacter check above prevents dangerous chaining.
-# If a specific tool has file output flags (e.g., --output-file),
-# consider adding it to the deny list or using exact matching.
-#
-# KNOWN LIMITATION: Commands like "npm test", "npm run build", and "make"
-# execute project-defined scripts (package.json, Makefile). If the AI agent
-# modifies these files in the same session, it could inject arbitrary commands
-# that get auto-approved. In high-security environments, consider requiring
-# manual approval for these commands or adding session-aware checks.
+# SECURITY PRINCIPLES:
+# 1. Only auto-approve commands with fixed behavior (not project-defined)
+# 2. Commands that execute project scripts (npm test, make) are NOT auto-approved
+#    because the agent can edit those scripts and inject arbitrary code
+# 3. File read commands are NOT auto-approved (they could read ~/.ssh/*, /etc/*)
+#    The Read/Glob/Grep tools are preferred and auto-approved below
 
 if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
     # SECURITY: Never auto-approve commands with shell metacharacters
@@ -74,23 +65,18 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Test commands - always safe
-    if [[ "$BASH_COMMAND" =~ ^npm\ test ]] || \
-       [[ "$BASH_COMMAND" =~ ^pnpm\ test ]] || \
-       [[ "$BASH_COMMAND" =~ ^yarn\ test ]] || \
-       [[ "$BASH_COMMAND" =~ ^pytest ]] || \
+    # Compiler/runtime test commands with FIXED behavior (not project-defined scripts)
+    # These run the language's built-in test runner, not user scripts:
+    if [[ "$BASH_COMMAND" =~ ^pytest ]] || \
        [[ "$BASH_COMMAND" =~ ^python\ -m\ pytest ]] || \
        [[ "$BASH_COMMAND" =~ ^cargo\ test ]] || \
-       [[ "$BASH_COMMAND" =~ ^go\ test ]] || \
-       [[ "$BASH_COMMAND" =~ ^make\ test ]]; then
+       [[ "$BASH_COMMAND" =~ ^go\ test ]]; then
         echo '{"decision": "approve"}'
         exit 0
     fi
 
-    # Lint commands - safe, read-only
-    if [[ "$BASH_COMMAND" =~ ^npm\ run\ lint ]] || \
-       [[ "$BASH_COMMAND" =~ ^npx\ eslint ]] || \
-       [[ "$BASH_COMMAND" =~ ^pnpm\ lint ]] || \
+    # Lint commands - read-only analysis with fixed behavior
+    if [[ "$BASH_COMMAND" =~ ^npx\ eslint ]] || \
        [[ "$BASH_COMMAND" =~ ^ruff\ check ]] || \
        [[ "$BASH_COMMAND" =~ ^flake8 ]] || \
        [[ "$BASH_COMMAND" =~ ^cargo\ clippy ]] || \
@@ -101,7 +87,7 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Format commands - safe, modifies files but in expected ways
+    # Format commands - fixed behavior formatters
     if [[ "$BASH_COMMAND" =~ ^npx\ prettier ]] || \
        [[ "$BASH_COMMAND" =~ ^black ]] || \
        [[ "$BASH_COMMAND" =~ ^isort ]] || \
@@ -112,19 +98,14 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Build commands - safe
-    if [[ "$BASH_COMMAND" =~ ^npm\ run\ build ]] || \
-       [[ "$BASH_COMMAND" =~ ^pnpm\ build ]] || \
-       [[ "$BASH_COMMAND" =~ ^yarn\ build ]] || \
-       [[ "$BASH_COMMAND" =~ ^cargo\ build ]] || \
-       [[ "$BASH_COMMAND" =~ ^go\ build ]] || \
-       [[ "$BASH_COMMAND" =~ ^make$ ]] || \
-       [[ "$BASH_COMMAND" =~ ^make\ build ]]; then
+    # Compiler/build commands with FIXED behavior (not project-defined scripts)
+    if [[ "$BASH_COMMAND" =~ ^cargo\ build ]] || \
+       [[ "$BASH_COMMAND" =~ ^go\ build ]]; then
         echo '{"decision": "approve"}'
         exit 0
     fi
 
-    # Type checking - read-only
+    # Type checking - read-only with fixed behavior
     if [[ "$BASH_COMMAND" =~ ^npx\ tsc ]] || \
        [[ "$BASH_COMMAND" =~ ^tsc\ --noEmit ]] || \
        [[ "$BASH_COMMAND" =~ ^mypy ]]; then
@@ -161,7 +142,7 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Package info commands - safe
+    # Package info commands - safe (read-only metadata)
     if [[ "$BASH_COMMAND" =~ ^npm\ list ]] || \
        [[ "$BASH_COMMAND" =~ ^npm\ outdated ]] || \
        [[ "$BASH_COMMAND" =~ ^pip\ list ]] || \
@@ -171,23 +152,20 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # File listing/searching - safe
-    if [[ "$BASH_COMMAND" =~ ^ls ]] || \
-       [[ "$BASH_COMMAND" =~ ^find ]] || \
-       [[ "$BASH_COMMAND" =~ ^grep ]] || \
-       [[ "$BASH_COMMAND" =~ ^rg ]] || \
-       [[ "$BASH_COMMAND" =~ ^wc ]] || \
-       [[ "$BASH_COMMAND" =~ ^head ]] || \
-       [[ "$BASH_COMMAND" =~ ^tail ]] || \
-       [[ "$BASH_COMMAND" =~ ^cat ]]; then
-        echo '{"decision": "approve"}'
-        exit 0
-    fi
+    # NOTE: The following are intentionally NOT auto-approved because they
+    # execute project-defined scripts that the agent could modify:
+    #   npm test, npm run build, npm run lint, pnpm *, yarn *
+    #   make, make test, make build
+    # File read commands (ls, cat, find, grep, head, tail) are also NOT
+    # auto-approved because they can access files outside the repository.
+    # Use the Read/Glob/Grep tools instead (auto-approved below).
 fi
 
 # ============================================
-# FILE OPERATIONS
+# FILE OPERATIONS (Claude Code native tools)
 # ============================================
+# These tools are sandboxed by Claude Code and only access
+# files within the project directory.
 
 # Read operations are always safe
 if [[ "$TOOL_NAME" == "Read" ]]; then

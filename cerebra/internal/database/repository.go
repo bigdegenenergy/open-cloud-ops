@@ -44,6 +44,7 @@ func (db *DB) GetCostSummary(ctx context.Context, dimension string, from, to tim
 	}
 
 	// Use the whitelisted column name as the label too (not the raw input).
+	// Hard LIMIT prevents unbounded result sets in high-cardinality scenarios.
 	query := fmt.Sprintf(`
 		SELECT
 			'%s' AS dimension,
@@ -58,6 +59,7 @@ func (db *DB) GetCostSummary(ctx context.Context, dimension string, from, to tim
 		WHERE timestamp >= $1 AND timestamp <= $2
 		GROUP BY %s
 		ORDER BY total_cost_usd DESC
+		LIMIT 1000
 	`, col, col, col, col)
 
 	rows, err := db.Pool.Query(ctx, query, from, to)
