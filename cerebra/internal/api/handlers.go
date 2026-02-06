@@ -172,6 +172,9 @@ func (h *Handlers) CreateBudget(c *gin.Context) {
 
 	// Sync the budget to Redis for fast enforcement.
 	// On failure, rollback the DB write to prevent an unenforced budget.
+	// Note: SetBudget returns nil when Redis is unavailable (graceful degradation).
+	// The budget is stored in PostgreSQL (source of truth) and will take effect
+	// once Redis reconnects or on next startup sync.
 	if err := h.enforcer.SetBudget(budget.BudgetScope(req.Scope), req.EntityID, req.LimitUSD); err != nil {
 		log.Printf("Redis sync failed for budget %s/%s, rolling back DB: %v", req.Scope, req.EntityID, err)
 		if existing != nil {
