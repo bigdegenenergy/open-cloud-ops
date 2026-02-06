@@ -60,6 +60,12 @@ contains_shell_metacharacters() {
 # The shell metacharacter check above prevents dangerous chaining.
 # If a specific tool has file output flags (e.g., --output-file),
 # consider adding it to the deny list or using exact matching.
+#
+# KNOWN LIMITATION: Commands like "npm test", "npm run build", and "make"
+# execute project-defined scripts (package.json, Makefile). If the AI agent
+# modifies these files in the same session, it could inject arbitrary commands
+# that get auto-approved. In high-security environments, consider requiring
+# manual approval for these commands or adding session-aware checks.
 
 if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
     # SECURITY: Never auto-approve commands with shell metacharacters

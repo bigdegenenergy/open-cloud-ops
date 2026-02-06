@@ -25,12 +25,14 @@ import (
 	"github.com/google/uuid"
 )
 
-// maxRequestBodySize limits proxy request bodies to 10MB to prevent OOM.
-const maxRequestBodySize = 10 << 20 // 10 MB
-
-// maxResponseBodySize limits proxy response bodies to 10MB to prevent OOM.
-// LLM API responses are typically well under 1MB; streaming responses bypass this limit.
-const maxResponseBodySize = 10 << 20 // 10 MB
+// Default size limits for proxy request/response bodies.
+// Request limit is higher to accommodate multimodal payloads (base64 images/PDFs).
+// Response limit is lower since LLM text responses are typically well under 1MB;
+// streaming responses bypass this limit entirely.
+const (
+	defaultMaxRequestBodySize  = 50 << 20 // 50 MB (multimodal: images, PDFs)
+	defaultMaxResponseBodySize = 10 << 20 // 10 MB
+)
 
 // Provider represents a supported LLM API provider.
 type Provider string
@@ -50,10 +52,12 @@ var providerBaseURLs = map[Provider]string{
 
 // ProxyHandler manages the reverse proxying of LLM API requests.
 type ProxyHandler struct {
-	cfg      *config.Config
-	db       *database.DB
-	enforcer *budget.Enforcer
-	client   *http.Client
+	cfg                 *config.Config
+	db                  *database.DB
+	enforcer            *budget.Enforcer
+	client              *http.Client
+	maxRequestBodySize  int64
+	maxResponseBodySize int64
 }
 
 // NewProxyHandler creates a new ProxyHandler instance.
@@ -65,6 +69,8 @@ func NewProxyHandler(cfg *config.Config, db *database.DB, enforcer *budget.Enfor
 		client: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
+		maxRequestBodySize:  defaultMaxRequestBodySize,
+		maxResponseBodySize: defaultMaxResponseBodySize,
 	}
 }
 
@@ -89,13 +95,13 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	reqID := uuid.New().String()
 
 	// 1. Read the request body (with size limit to prevent OOM).
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRequestBodySize))
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, h.maxRequestBodySize))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 		return
 	}
 	defer c.Request.Body.Close()
-	if int64(len(body)) >= maxRequestBodySize {
+	if int64(len(body)) >= h.maxRequestBodySize {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
 		return
 	}
@@ -159,14 +165,14 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	}
 
 	// 6. Read the response body (with size limit to prevent OOM).
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodySize))
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
 		return
 	}
 
 	// Check if response was truncated by the size limit.
-	if int64(len(respBody)) >= maxResponseBodySize {
+	if int64(len(respBody)) >= h.maxResponseBodySize {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream response too large"})
 		return
 	}
@@ -236,6 +242,8 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 
 	// Capture the tail of the streamed data for usage metadata extraction.
 	// Usage info is in the final SSE chunks, so we keep a rolling tail buffer.
+	// Truncation happens on SSE event boundaries ("\n\n") to avoid splitting
+	// JSON payloads mid-object, which would cause unmarshal failures.
 	const maxCapture = 1 << 20 // 1 MB
 	var captured bytes.Buffer
 
@@ -246,11 +254,17 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 		if n > 0 {
 			w.Write(buf[:n])
 			captured.Write(buf[:n])
-			// When buffer exceeds cap, discard the oldest half to keep
-			// memory bounded while retaining the tail where usage metadata lives.
+			// When buffer exceeds cap, discard leading events to keep
+			// memory bounded while retaining complete trailing SSE events.
 			if captured.Len() > maxCapture {
 				b := captured.Bytes()
 				half := len(b) / 2
+				// Find the first SSE event boundary ("\n\n") after the midpoint
+				// so we only discard complete events, never partial JSON.
+				cut := bytes.Index(b[half:], []byte("\n\n"))
+				if cut >= 0 {
+					half += cut + 2 // skip past the "\n\n"
+				}
 				captured.Reset()
 				captured.Write(b[half:])
 			}

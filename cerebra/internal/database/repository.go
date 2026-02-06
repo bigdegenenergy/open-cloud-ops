@@ -28,21 +28,22 @@ func (db *DB) InsertRequest(ctx context.Context, req *models.APIRequest) error {
 }
 
 // GetCostSummary returns aggregated cost data grouped by a given dimension.
+// Only whitelisted dimension values are accepted; all SQL identifiers are
+// derived from the whitelisted map to prevent SQL injection.
 func (db *DB) GetCostSummary(ctx context.Context, dimension string, from, to time.Time) ([]models.CostSummary, error) {
-	var col string
-	switch dimension {
-	case "agent":
-		col = "agent_id"
-	case "team":
-		col = "team_id"
-	case "model":
-		col = "model"
-	case "provider":
-		col = "provider"
-	default:
+	// Whitelist: maps user-facing dimension names to SQL column identifiers.
+	allowed := map[string]string{
+		"agent":    "agent_id",
+		"team":     "team_id",
+		"model":    "model",
+		"provider": "provider",
+	}
+	col, ok := allowed[dimension]
+	if !ok {
 		return nil, fmt.Errorf("unsupported dimension: %s", dimension)
 	}
 
+	// Use the whitelisted column name as the label too (not the raw input).
 	query := fmt.Sprintf(`
 		SELECT
 			'%s' AS dimension,
@@ -57,7 +58,7 @@ func (db *DB) GetCostSummary(ctx context.Context, dimension string, from, to tim
 		WHERE timestamp >= $1 AND timestamp <= $2
 		GROUP BY %s
 		ORDER BY total_cost_usd DESC
-	`, dimension, col, col, col)
+	`, col, col, col, col)
 
 	rows, err := db.Pool.Query(ctx, query, from, to)
 	if err != nil {
