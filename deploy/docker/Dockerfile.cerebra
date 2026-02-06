@@ -7,7 +7,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /cerebra ./cmd/main.go
 
 FROM alpine:3.19
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates && \
+    addgroup -S cerebra && adduser -S cerebra -G cerebra
 COPY --from=builder /cerebra /cerebra
+USER cerebra
 EXPOSE 8080
 ENTRYPOINT ["/cerebra"]

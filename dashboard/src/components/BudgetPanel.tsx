@@ -1,17 +1,17 @@
-import { useState, useEffect } from 'react';
-import { getBudgets, createBudget } from '../api';
-import type { Budget } from '../api';
+import { useState, useEffect } from "react";
+import { getBudgets, createBudget } from "../api";
+import type { Budget } from "../api";
 
 function utilizationColor(pct: number): string {
-  if (pct >= 90) return 'bg-accent-red';
-  if (pct >= 70) return 'bg-accent-amber';
-  return 'bg-accent-green';
+  if (pct >= 90) return "bg-accent-red";
+  if (pct >= 70) return "bg-accent-amber";
+  return "bg-accent-green";
 }
 
 function utilizationTextColor(pct: number): string {
-  if (pct >= 90) return 'text-accent-red';
-  if (pct >= 70) return 'text-accent-amber';
-  return 'text-accent-green';
+  if (pct >= 90) return "text-accent-red";
+  if (pct >= 70) return "text-accent-amber";
+  return "text-accent-green";
 }
 
 export default function BudgetPanel() {
@@ -22,13 +22,30 @@ export default function BudgetPanel() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const [scope, setScope] = useState('team');
-  const [entityId, setEntityId] = useState('');
-  const [limitUsd, setLimitUsd] = useState('');
-  const [periodDays, setPeriodDays] = useState('30');
+  const [scope, setScope] = useState("team");
+  const [entityId, setEntityId] = useState("");
+  const [limitUsd, setLimitUsd] = useState("");
+  const [periodDays, setPeriodDays] = useState("30");
 
   useEffect(() => {
-    loadBudgets();
+    let cancelled = false;
+    setLoading(true);
+    getBudgets()
+      .then((data) => {
+        if (!cancelled) setBudgets(data);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message =
+          err instanceof Error ? err.message : "Failed to load budgets";
+        setError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function loadBudgets() {
@@ -36,7 +53,8 @@ export default function BudgetPanel() {
     getBudgets()
       .then(setBudgets)
       .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Failed to load budgets';
+        const message =
+          err instanceof Error ? err.message : "Failed to load budgets";
         setError(message);
       })
       .finally(() => setLoading(false));
@@ -50,15 +68,15 @@ export default function BudgetPanel() {
     const period = parseInt(periodDays, 10);
 
     if (!entityId.trim()) {
-      setFormError('Entity ID is required');
+      setFormError("Entity ID is required");
       return;
     }
     if (isNaN(limit) || limit <= 0) {
-      setFormError('Budget limit must be a positive number');
+      setFormError("Budget limit must be a positive number");
       return;
     }
     if (isNaN(period) || period <= 0) {
-      setFormError('Period must be a positive number of days');
+      setFormError("Period must be a positive number of days");
       return;
     }
 
@@ -71,13 +89,14 @@ export default function BudgetPanel() {
     })
       .then(() => {
         setShowForm(false);
-        setEntityId('');
-        setLimitUsd('');
-        setPeriodDays('30');
+        setEntityId("");
+        setLimitUsd("");
+        setPeriodDays("30");
         loadBudgets();
       })
       .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Failed to create budget';
+        const message =
+          err instanceof Error ? err.message : "Failed to create budget";
         setFormError(message);
       })
       .finally(() => setSubmitting(false));
@@ -86,20 +105,27 @@ export default function BudgetPanel() {
   return (
     <div className="bg-bg-card border border-border rounded-xl p-6">
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-lg font-semibold text-text-primary">Budget Management</h2>
+        <h2 className="text-lg font-semibold text-text-primary">
+          Budget Management
+        </h2>
         <button
           onClick={() => setShowForm(!showForm)}
           className="px-3 py-1.5 bg-accent-blue text-white text-xs font-medium rounded-lg hover:bg-accent-blue/80 transition-colors cursor-pointer"
         >
-          {showForm ? 'Cancel' : '+ New Budget'}
+          {showForm ? "Cancel" : "+ New Budget"}
         </button>
       </div>
 
       {showForm && (
-        <form onSubmit={handleSubmit} className="mb-6 p-4 bg-bg-secondary rounded-lg border border-border space-y-4">
+        <form
+          onSubmit={handleSubmit}
+          className="mb-6 p-4 bg-bg-secondary rounded-lg border border-border space-y-4"
+        >
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-text-secondary text-xs font-medium mb-1">Scope</label>
+              <label className="block text-text-secondary text-xs font-medium mb-1">
+                Scope
+              </label>
               <select
                 value={scope}
                 onChange={(e) => setScope(e.target.value)}
@@ -112,7 +138,9 @@ export default function BudgetPanel() {
               </select>
             </div>
             <div>
-              <label className="block text-text-secondary text-xs font-medium mb-1">Entity ID</label>
+              <label className="block text-text-secondary text-xs font-medium mb-1">
+                Entity ID
+              </label>
               <input
                 type="text"
                 value={entityId}
@@ -122,7 +150,9 @@ export default function BudgetPanel() {
               />
             </div>
             <div>
-              <label className="block text-text-secondary text-xs font-medium mb-1">Limit (USD)</label>
+              <label className="block text-text-secondary text-xs font-medium mb-1">
+                Limit (USD)
+              </label>
               <input
                 type="number"
                 step="0.01"
@@ -134,7 +164,9 @@ export default function BudgetPanel() {
               />
             </div>
             <div>
-              <label className="block text-text-secondary text-xs font-medium mb-1">Period (days)</label>
+              <label className="block text-text-secondary text-xs font-medium mb-1">
+                Period (days)
+              </label>
               <input
                 type="number"
                 min="1"
@@ -144,13 +176,15 @@ export default function BudgetPanel() {
               />
             </div>
           </div>
-          {formError && <div className="text-accent-red text-xs">{formError}</div>}
+          {formError && (
+            <div className="text-accent-red text-xs">{formError}</div>
+          )}
           <button
             type="submit"
             disabled={submitting}
             className="px-4 py-2 bg-accent-green text-white text-sm font-medium rounded-lg hover:bg-accent-green/80 transition-colors disabled:opacity-50 cursor-pointer"
           >
-            {submitting ? 'Creating...' : 'Create Budget'}
+            {submitting ? "Creating..." : "Create Budget"}
           </button>
         </form>
       )}
@@ -158,7 +192,10 @@ export default function BudgetPanel() {
       {loading ? (
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-16 bg-bg-hover rounded-lg animate-pulse" />
+            <div
+              key={i}
+              className="h-16 bg-bg-hover rounded-lg animate-pulse"
+            />
           ))}
         </div>
       ) : error ? (
@@ -172,15 +209,22 @@ export default function BudgetPanel() {
           {budgets.map((b) => {
             const pct = Math.min(b.utilization_pct, 100);
             return (
-              <div key={`${b.scope}-${b.entity_id}`} className="p-4 bg-bg-secondary rounded-lg border border-border">
+              <div
+                key={`${b.scope}-${b.entity_id}`}
+                className="p-4 bg-bg-secondary rounded-lg border border-border"
+              >
                 <div className="flex items-center justify-between mb-2">
                   <div>
-                    <span className="text-text-primary font-medium text-sm">{b.entity_id}</span>
+                    <span className="text-text-primary font-medium text-sm">
+                      {b.entity_id}
+                    </span>
                     <span className="text-text-muted text-xs ml-2 px-1.5 py-0.5 bg-bg-card rounded">
                       {b.scope}
                     </span>
                   </div>
-                  <span className={`text-sm font-medium ${utilizationTextColor(b.utilization_pct)}`}>
+                  <span
+                    className={`text-sm font-medium ${utilizationTextColor(b.utilization_pct)}`}
+                  >
                     {b.utilization_pct.toFixed(1)}%
                   </span>
                 </div>
@@ -192,7 +236,9 @@ export default function BudgetPanel() {
                 </div>
                 <div className="flex justify-between text-xs text-text-muted">
                   <span>${b.spent_usd.toFixed(2)} spent</span>
-                  <span>${b.limit_usd.toFixed(2)} limit / {b.period_days}d</span>
+                  <span>
+                    ${b.limit_usd.toFixed(2)} limit / {b.period_days}d
+                  </span>
                 </div>
               </div>
             );

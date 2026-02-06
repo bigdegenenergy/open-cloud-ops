@@ -73,6 +73,7 @@ func TestDSN(t *testing.T) {
 		DBHost:     "localhost",
 		DBPort:     5432,
 		DBName:     "testdb",
+		DBSSLMode:  "disable",
 	}
 
 	expected := "postgres://testuser:testpass@localhost:5432/testdb?sslmode=disable"

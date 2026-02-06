@@ -33,9 +33,22 @@ func (h *Handlers) HealthCheck(c *gin.Context) {
 	})
 }
 
+// requireDB returns true if the database is available, or sends a 503 and returns false.
+func (h *Handlers) requireDB(c *gin.Context) bool {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database unavailable"})
+		return false
+	}
+	return true
+}
+
 // GetCostSummary returns aggregated cost data.
 // Query params: dimension (agent|team|model|provider), from, to
 func (h *Handlers) GetCostSummary(c *gin.Context) {
+	if !h.requireDB(c) {
+		return
+	}
+
 	dimension := c.DefaultQuery("dimension", "model")
 	fromStr := c.DefaultQuery("from", time.Now().AddDate(0, -1, 0).Format(time.RFC3339))
 	toStr := c.DefaultQuery("to", time.Now().Format(time.RFC3339))
@@ -67,6 +80,10 @@ func (h *Handlers) GetCostSummary(c *gin.Context) {
 
 // GetRecentRequests returns the most recent API requests.
 func (h *Handlers) GetRecentRequests(c *gin.Context) {
+	if !h.requireDB(c) {
+		return
+	}
+
 	limitStr := c.DefaultQuery("limit", "50")
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil || limit < 1 || limit > 1000 {
@@ -87,6 +104,10 @@ func (h *Handlers) GetRecentRequests(c *gin.Context) {
 
 // ListBudgets returns all configured budgets.
 func (h *Handlers) ListBudgets(c *gin.Context) {
+	if !h.requireDB(c) {
+		return
+	}
+
 	scope := c.Query("scope")
 
 	budgets, err := h.db.ListBudgets(c.Request.Context(), scope)
@@ -111,6 +132,10 @@ type CreateBudgetRequest struct {
 
 // CreateBudget creates or updates a budget.
 func (h *Handlers) CreateBudget(c *gin.Context) {
+	if !h.requireDB(c) {
+		return
+	}
+
 	var req CreateBudgetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -145,6 +170,10 @@ func (h *Handlers) CreateBudget(c *gin.Context) {
 
 // GetBudget retrieves a specific budget.
 func (h *Handlers) GetBudget(c *gin.Context) {
+	if !h.requireDB(c) {
+		return
+	}
+
 	scope := c.Param("scope")
 	entityID := c.Param("entity_id")
 

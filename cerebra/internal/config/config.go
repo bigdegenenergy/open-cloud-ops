@@ -20,6 +20,9 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 
+	// Database SSL
+	DBSSLMode string
+
 	// Redis
 	RedisHost     string
 	RedisPort     int
@@ -41,6 +44,7 @@ func Load() (*Config, error) {
 		DBName:     getEnv("POSTGRES_DB", "opencloudops"),
 		DBUser:     getEnv("POSTGRES_USER", "oco_user"),
 		DBPassword: getEnv("POSTGRES_PASSWORD", ""),
+		DBSSLMode:  getEnv("POSTGRES_SSLMODE", "disable"),
 
 		RedisHost:     getEnv("REDIS_HOST", "localhost"),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),
@@ -67,8 +71,8 @@ func Load() (*Config, error) {
 
 // DSN returns the PostgreSQL connection string.
 func (c *Config) DSN() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName)
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName, c.DBSSLMode)
 }
 
 // RedisAddr returns the Redis address in host:port format.

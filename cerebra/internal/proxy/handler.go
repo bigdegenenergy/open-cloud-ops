@@ -25,6 +25,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxRequestBodySize limits proxy request bodies to 10MB to prevent OOM.
+const maxRequestBodySize = 10 << 20 // 10 MB
+
+// maxResponseBodySize limits proxy response bodies to 100MB to prevent OOM.
+const maxResponseBodySize = 100 << 20 // 100 MB
+
 // Provider represents a supported LLM API provider.
 type Provider string
 
@@ -81,13 +87,17 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	start := time.Now()
 	reqID := uuid.New().String()
 
-	// 1. Read the request body.
-	body, err := io.ReadAll(c.Request.Body)
+	// 1. Read the request body (with size limit to prevent OOM).
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRequestBodySize))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 		return
 	}
 	defer c.Request.Body.Close()
+	if int64(len(body)) >= maxRequestBodySize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+		return
+	}
 
 	// 2. Extract metadata from headers and body.
 	agentID := c.GetHeader("X-Agent-ID")
@@ -118,8 +128,11 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 		return
 	}
 
-	// 4. Build and send the upstream request.
+	// 4. Build and send the upstream request (preserving query parameters).
 	upstreamURL := buildUpstreamURL(provider, c.Request.URL.Path)
+	if c.Request.URL.RawQuery != "" {
+		upstreamURL += "?" + c.Request.URL.RawQuery
+	}
 	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create upstream request"})
@@ -137,8 +150,8 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	}
 	defer resp.Body.Close()
 
-	// 5. Read the response body.
-	respBody, err := io.ReadAll(resp.Body)
+	// 5. Read the response body (with size limit to prevent OOM).
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
 		return
@@ -151,7 +164,7 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	totalTokens := inputTokens + outputTokens
 	costUSD := h.calculateCost(c.Request.Context(), string(provider), model, inputTokens, outputTokens)
 
-	// 7. Record the request in the database.
+	// 7. Record the request in the database (if available).
 	apiReq := &models.APIRequest{
 		ID:           reqID,
 		Provider:     models.LLMProvider(provider),
@@ -171,8 +184,10 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := h.db.InsertRequest(ctx, apiReq); err != nil {
-			log.Printf("[%s] failed to record request: %v", reqID, err)
+		if h.db != nil {
+			if err := h.db.InsertRequest(ctx, apiReq); err != nil {
+				log.Printf("[%s] failed to record request: %v", reqID, err)
+			}
 		}
 		if err := h.enforcer.RecordSpend(budget.ScopeAgent, agentID, costUSD); err != nil {
 			log.Printf("[%s] failed to record spend: %v", reqID, err)
@@ -218,6 +233,9 @@ func (h *ProxyHandler) setProviderAuth(req *http.Request, provider Provider, ori
 
 // calculateCost computes the cost of a request based on model pricing.
 func (h *ProxyHandler) calculateCost(ctx context.Context, provider, model string, inputTokens, outputTokens int64) float64 {
+	if h.db == nil {
+		return 0
+	}
 	pricing, err := h.db.GetModelPricing(ctx, provider, model)
 	if err != nil {
 		log.Printf("pricing not found for %s/%s, using zero cost", provider, model)
@@ -249,11 +267,16 @@ func buildUpstreamURL(provider Provider, requestPath string) string {
 }
 
 // copyHeaders copies relevant headers from the original request.
+// Auth headers (Authorization, X-API-Key, X-Goog-Api-Key) are stripped here
+// and set explicitly by setProviderAuth to prevent credential leakage across providers.
 func copyHeaders(src, dst http.Header) {
 	for key, vals := range src {
 		lower := strings.ToLower(key)
-		// Skip hop-by-hop headers and internal headers
-		if lower == "host" || lower == "connection" || strings.HasPrefix(lower, "x-agent") ||
+		// Skip hop-by-hop headers, internal headers, and auth headers
+		// (auth is set explicitly per-provider by setProviderAuth)
+		if lower == "host" || lower == "connection" ||
+			lower == "authorization" || lower == "x-api-key" || lower == "x-goog-api-key" ||
+			strings.HasPrefix(lower, "x-agent") ||
 			strings.HasPrefix(lower, "x-team") || strings.HasPrefix(lower, "x-org") {
 			continue
 		}

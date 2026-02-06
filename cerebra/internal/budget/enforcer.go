@@ -36,6 +36,29 @@ func NewEnforcer(rdb *redis.Client) *Enforcer {
 	return &Enforcer{rdb: rdb}
 }
 
+// checkBudgetScript atomically checks budget and increments spend if allowed.
+// Returns: 1 if allowed (and spend incremented), 0 if budget exceeded, -1 if no limit set.
+var checkBudgetScript = redis.NewScript(`
+local limit = redis.call('GET', KEYS[1])
+if not limit then
+	return -1
+end
+limit = tonumber(limit)
+local spent = tonumber(redis.call('GET', KEYS[2]) or '0')
+local cost = tonumber(ARGV[1])
+if spent + cost > limit then
+	return 0
+end
+if cost > 0 then
+	redis.call('INCRBYFLOAT', KEYS[2], ARGV[1])
+	local ttl = redis.call('TTL', KEYS[2])
+	if ttl < 0 then
+		redis.call('EXPIRE', KEYS[2], ARGV[2])
+	end
+end
+return 1
+`)
+
 // CheckBudget verifies whether the given entity has remaining budget.
 // Returns true if the request is allowed, false if the budget is exhausted.
 func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string, estimatedCostUSD float64) (bool, error) {
@@ -50,29 +73,27 @@ func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string, estimatedCost
 	limitKey := fmt.Sprintf("budget:%s:%s:limit", scope, entityID)
 	spentKey := fmt.Sprintf("budget:%s:%s:spent", scope, entityID)
 
-	limit, err := e.rdb.Get(ctx, limitKey).Float64()
-	if err == redis.Nil {
+	// Default spend TTL: 30 days (matches budget period).
+	spendTTLSec := int64(30 * 24 * 3600)
+
+	result, err := checkBudgetScript.Run(ctx, e.rdb,
+		[]string{limitKey, spentKey},
+		estimatedCostUSD, spendTTLSec,
+	).Int64()
+	if err != nil {
+		return true, fmt.Errorf("checking budget: %w", err)
+	}
+
+	switch result {
+	case -1:
 		// No budget configured — allow the request.
 		return true, nil
-	}
-	if err != nil {
-		return true, fmt.Errorf("checking budget limit: %w", err)
-	}
-
-	spent, err := e.rdb.Get(ctx, spentKey).Float64()
-	if err == redis.Nil {
-		spent = 0
-	} else if err != nil {
-		return true, fmt.Errorf("checking budget spent: %w", err)
-	}
-
-	if spent+estimatedCostUSD > limit {
-		log.Printf("budget exceeded for %s/%s: spent=%.4f + est=%.4f > limit=%.4f",
-			scope, entityID, spent, estimatedCostUSD, limit)
+	case 0:
+		log.Printf("budget exceeded for %s/%s", scope, entityID)
 		return false, nil
+	default:
+		return true, nil
 	}
-
-	return true, nil
 }
 
 // RecordSpend updates the spend for a given entity after a successful request.
@@ -85,7 +106,19 @@ func (e *Enforcer) RecordSpend(scope BudgetScope, entityID string, costUSD float
 	defer cancel()
 
 	spentKey := fmt.Sprintf("budget:%s:%s:spent", scope, entityID)
-	return e.rdb.IncrByFloat(ctx, spentKey, costUSD).Err()
+	if err := e.rdb.IncrByFloat(ctx, spentKey, costUSD).Err(); err != nil {
+		return err
+	}
+
+	// Ensure spend key has a TTL (30 days) so it auto-resets each period.
+	ttl, err := e.rdb.TTL(ctx, spentKey).Result()
+	if err != nil {
+		return err
+	}
+	if ttl < 0 {
+		return e.rdb.Expire(ctx, spentKey, 30*24*time.Hour).Err()
+	}
+	return nil
 }
 
 // SetBudget configures a budget limit in Redis for fast enforcement.

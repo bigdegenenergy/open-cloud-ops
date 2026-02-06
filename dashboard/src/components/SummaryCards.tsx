@@ -1,18 +1,18 @@
-import { useState, useEffect } from 'react';
-import { getReport } from '../api';
-import type { ReportSummary } from '../api';
+import { useState, useEffect } from "react";
+import { getReport } from "../api";
+import type { ReportSummary } from "../api";
 
 function formatUsd(value: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
 }
 
 function formatNumber(value: number): string {
-  return new Intl.NumberFormat('en-US').format(value);
+  return new Intl.NumberFormat("en-US").format(value);
 }
 
 interface CardProps {
@@ -42,20 +42,33 @@ export default function SummaryCards() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
     getReport()
-      .then(setReport)
+      .then((data) => {
+        if (!cancelled) setReport(data);
+      })
       .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Failed to load report';
+        if (cancelled) return;
+        const message =
+          err instanceof Error ? err.message : "Failed to load report";
         setError(message);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         {[1, 2, 3, 4].map((i) => (
-          <div key={i} className="bg-bg-card border border-border rounded-xl p-6 animate-pulse">
+          <div
+            key={i}
+            className="bg-bg-card border border-border rounded-xl p-6 animate-pulse"
+          >
             <div className="h-4 bg-bg-hover rounded w-24 mb-4" />
             <div className="h-8 bg-bg-hover rounded w-32 mb-2" />
             <div className="h-3 bg-bg-hover rounded w-20" />
@@ -68,18 +81,43 @@ export default function SummaryCards() {
   if (error) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        <Card title="Total Cost" value="--" subtitle="No data available" accentClass="text-accent-blue" icon="$" />
-        <Card title="Total Requests" value="--" subtitle="No data available" accentClass="text-accent-green" icon="#" />
-        <Card title="Avg Latency" value="--" subtitle="No data available" accentClass="text-accent-amber" icon="~" />
-        <Card title="Savings" value="--" subtitle="No data available" accentClass="text-accent-purple" icon="%" />
+        <Card
+          title="Total Cost"
+          value="--"
+          subtitle="No data available"
+          accentClass="text-accent-blue"
+          icon="$"
+        />
+        <Card
+          title="Total Requests"
+          value="--"
+          subtitle="No data available"
+          accentClass="text-accent-green"
+          icon="#"
+        />
+        <Card
+          title="Avg Latency"
+          value="--"
+          subtitle="No data available"
+          accentClass="text-accent-amber"
+          icon="~"
+        />
+        <Card
+          title="Savings"
+          value="--"
+          subtitle="No data available"
+          accentClass="text-accent-purple"
+          icon="%"
+        />
       </div>
     );
   }
 
   const r = report!;
-  const periodLabel = r.period_start && r.period_end
-    ? `${r.period_start.slice(0, 10)} to ${r.period_end.slice(0, 10)}`
-    : 'Current period';
+  const periodLabel =
+    r.period_start && r.period_end
+      ? `${r.period_start.slice(0, 10)} to ${r.period_end.slice(0, 10)}`
+      : "Current period";
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
