@@ -227,7 +227,7 @@ jobs:
 
       - name: Run Claude Code Action
         if: steps.check-perms.outputs.has_access == 'true'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Use GH_TOKEN for git operations (push, create branches, etc.)

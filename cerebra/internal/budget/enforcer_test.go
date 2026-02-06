@@ -14,7 +14,7 @@ func TestNewEnforcer_NilRedis(t *testing.T) {
 func TestCheckBudget_NilRedis_AllowsAll(t *testing.T) {
 	e := NewEnforcer(nil, true)
 
-	allowed, err := e.CheckBudget(ScopeAgent, "test-agent")
+	allowed, err := e.CheckBudget(ScopeAgent, "test-agent", 0.01)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -26,12 +26,30 @@ func TestCheckBudget_NilRedis_AllowsAll(t *testing.T) {
 func TestCheckBudget_NilRedis_FailClosed(t *testing.T) {
 	e := NewEnforcer(nil, false)
 
-	allowed, err := e.CheckBudget(ScopeAgent, "test-agent")
+	allowed, err := e.CheckBudget(ScopeAgent, "test-agent", 0.01)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if allowed {
 		t.Error("expected request to be blocked with nil Redis and fail-closed")
+	}
+}
+
+func TestAdjustReservation_NilRedis_NoError(t *testing.T) {
+	e := NewEnforcer(nil, true)
+
+	err := e.AdjustReservation(ScopeAgent, "test-agent", 0.05)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAdjustReservation_ZeroDiff_NoError(t *testing.T) {
+	e := NewEnforcer(nil, true)
+
+	err := e.AdjustReservation(ScopeAgent, "test-agent", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

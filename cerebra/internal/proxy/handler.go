@@ -122,8 +122,9 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 
 	model := extractModel(body, provider)
 
-	// 3. Check budget before forwarding (pre-flight, cost unknown until response).
-	allowed, err := h.enforcer.CheckBudget(budget.ScopeAgent, agentID)
+	// 3. Check budget before forwarding (atomically reserves estimated cost).
+	const estimatedCost = 0.01 // Conservative default; reconciled after response.
+	allowed, err := h.enforcer.CheckBudget(budget.ScopeAgent, agentID, estimatedCost)
 	if err != nil {
 		log.Printf("[%s] budget check error: %v", reqID, err)
 	}
@@ -135,6 +136,13 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 		return
 	}
 
+	// releaseReservation undoes the estimated cost reservation on proxy failure.
+	releaseReservation := func() {
+		if err := h.enforcer.AdjustReservation(budget.ScopeAgent, agentID, -estimatedCost); err != nil {
+			log.Printf("[%s] failed to release budget reservation: %v", reqID, err)
+		}
+	}
+
 	// 4. Build and send the upstream request (preserving query parameters).
 	upstreamURL := buildUpstreamURL(provider, c.Request.URL.Path)
 	if c.Request.URL.RawQuery != "" {
@@ -142,6 +150,7 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	}
 	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, upstreamURL, bytes.NewReader(body))
 	if err != nil {
+		releaseReservation()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create upstream request"})
 		return
 	}
@@ -152,6 +161,7 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 
 	resp, err := h.client.Do(upstreamReq)
 	if err != nil {
+		releaseReservation()
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("upstream request failed: %v", err)})
 		return
 	}
@@ -160,19 +170,21 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	// 5. Check if the response is a streaming response (SSE).
 	contentType := resp.Header.Get("Content-Type")
 	if strings.Contains(contentType, "text/event-stream") {
-		h.streamResponse(c, resp, reqID, provider, model, agentID, teamID, orgID, start)
+		h.streamResponse(c, resp, reqID, provider, model, agentID, teamID, orgID, start, estimatedCost)
 		return
 	}
 
 	// 6. Read the response body (with size limit to prevent OOM).
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodySize))
 	if err != nil {
+		releaseReservation()
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
 		return
 	}
 
 	// Check if response was truncated by the size limit.
 	if int64(len(respBody)) >= h.maxResponseBodySize {
+		releaseReservation()
 		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream response too large"})
 		return
 	}
@@ -209,8 +221,11 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 				log.Printf("[%s] failed to record request: %v", reqID, err)
 			}
 		}
-		if err := h.enforcer.RecordSpend(budget.ScopeAgent, agentID, costUSD); err != nil {
-			log.Printf("[%s] failed to record spend: %v", reqID, err)
+		// Reconcile the reservation: adjust by (actual - estimated) cost.
+		if diff := costUSD - estimatedCost; diff != 0 {
+			if err := h.enforcer.AdjustReservation(budget.ScopeAgent, agentID, diff); err != nil {
+				log.Printf("[%s] failed to adjust budget reservation: %v", reqID, err)
+			}
 		}
 	}()
 
@@ -230,7 +245,7 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 // post-stream cost tracking. A capped buffer accumulates the streamed data so
 // token usage can be extracted from the final SSE chunks (providers typically
 // include usage metadata in their final message_delta / usage chunk).
-func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID string, provider Provider, model, agentID, teamID, orgID string, start time.Time) {
+func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID string, provider Provider, model, agentID, teamID, orgID string, start time.Time, estimatedCost float64) {
 	// Forward response headers.
 	for key, vals := range resp.Header {
 		for _, v := range vals {
@@ -279,7 +294,7 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 	totalTokens := inputTokens + outputTokens
 	costUSD := h.calculateCost(context.Background(), string(provider), model, inputTokens, outputTokens)
 
-	// Record the streaming request and spend.
+	// Record the streaming request and reconcile budget reservation.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -303,8 +318,11 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 				log.Printf("[%s] failed to record streaming request: %v", reqID, err)
 			}
 		}
-		if err := h.enforcer.RecordSpend(budget.ScopeAgent, agentID, costUSD); err != nil {
-			log.Printf("[%s] failed to record streaming spend: %v", reqID, err)
+		// Reconcile the reservation: adjust by (actual - estimated) cost.
+		if diff := costUSD - estimatedCost; diff != 0 {
+			if err := h.enforcer.AdjustReservation(budget.ScopeAgent, agentID, diff); err != nil {
+				log.Printf("[%s] failed to adjust streaming budget reservation: %v", reqID, err)
+			}
 		}
 	}()
 }

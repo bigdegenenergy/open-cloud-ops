@@ -48,7 +48,22 @@ func (db *DB) Close() {
 }
 
 // Migrate runs database schema migrations.
+// An advisory lock prevents concurrent replicas from racing on DDL statements.
 func (db *DB) Migrate(ctx context.Context) error {
+	// Acquire a dedicated connection for the advisory lock.
+	conn, err := db.Pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection for migration: %w", err)
+	}
+	defer conn.Release()
+
+	// pg_advisory_lock(1) blocks until the lock is available and auto-releases
+	// when the connection is returned to the pool (or explicitly unlocked).
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(1)); err != nil {
+		return fmt.Errorf("acquiring migration lock: %w", err)
+	}
+	defer conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", int64(1))
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS organizations (
 		id          TEXT PRIMARY KEY,
@@ -120,7 +135,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_api_requests_model ON api_requests(model);
 	`
 
-	_, err := db.Pool.Exec(ctx, schema)
+	_, err = conn.Exec(ctx, schema)
 	if err != nil {
 		return fmt.Errorf("running migrations: %w", err)
 	}

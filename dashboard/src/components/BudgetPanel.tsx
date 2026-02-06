@@ -207,7 +207,8 @@ export default function BudgetPanel() {
       ) : (
         <div className="space-y-3">
           {budgets.map((b) => {
-            const pct = Math.min(b.utilization_pct, 100);
+            const safePct = b.limit_usd > 0 ? b.utilization_pct : 0;
+            const pct = Math.min(safePct, 100);
             return (
               <div
                 key={`${b.scope}-${b.entity_id}`}
@@ -223,14 +224,14 @@ export default function BudgetPanel() {
                     </span>
                   </div>
                   <span
-                    className={`text-sm font-medium ${utilizationTextColor(b.utilization_pct)}`}
+                    className={`text-sm font-medium ${utilizationTextColor(safePct)}`}
                   >
-                    {b.utilization_pct.toFixed(1)}%
+                    {safePct.toFixed(1)}%
                   </span>
                 </div>
                 <div className="w-full bg-bg-card rounded-full h-2 mb-2">
                   <div
-                    className={`h-2 rounded-full transition-all ${utilizationColor(b.utilization_pct)}`}
+                    className={`h-2 rounded-full transition-all ${utilizationColor(safePct)}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>

@@ -39,26 +39,33 @@ func NewEnforcer(rdb *redis.Client, failOpen bool) *Enforcer {
 	return &Enforcer{rdb: rdb, failOpen: failOpen}
 }
 
-// checkBudgetScript checks if the entity's spend has reached its budget limit.
-// Returns: 1 if allowed, 0 if budget exhausted, -1 if no limit configured.
-// This is a read-only check — spend is recorded separately by RecordSpend after
-// the response completes and the actual cost is known.
-var checkBudgetScript = redis.NewScript(`
+// checkAndReserveBudgetScript atomically checks the budget AND reserves the
+// estimated cost. This prevents concurrent requests from bypassing the budget
+// limit via a time-of-check-to-time-of-use (TOCTOU) race.
+// KEYS[1] = limit key, KEYS[2] = spent key, ARGV[1] = estimated cost.
+// Returns: 1 if reserved (allowed), 0 if budget would be exceeded, -1 if no limit.
+var checkAndReserveBudgetScript = redis.NewScript(`
 local limit = redis.call('GET', KEYS[1])
 if not limit then
 	return -1
 end
 local spent = tonumber(redis.call('GET', KEYS[2]) or '0')
-if spent >= tonumber(limit) then
+local est = tonumber(ARGV[1])
+if spent + est > tonumber(limit) then
 	return 0
+end
+redis.call('INCRBYFLOAT', KEYS[2], est)
+if redis.call('TTL', KEYS[2]) < 0 then
+	redis.call('EXPIRE', KEYS[2], 2592000)
 end
 return 1
 `)
 
-// CheckBudget verifies whether the given entity has remaining budget.
-// Returns true if the request is allowed, false if the budget is exhausted.
-// This is a pre-flight check only; actual cost is unknown until after the response.
-func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string) (bool, error) {
+// CheckBudget atomically verifies remaining budget AND reserves the estimated cost.
+// Returns true if the request is allowed (and estimated cost is reserved), false
+// if the budget would be exceeded. After the request completes, call
+// AdjustReservation to reconcile the reservation with the actual cost.
+func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string, estimatedCost float64) (bool, error) {
 	if e.rdb == nil {
 		return e.failOpen, nil
 	}
@@ -69,8 +76,9 @@ func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string) (bool, error)
 	limitKey := fmt.Sprintf("budget:%s:%s:limit", scope, entityID)
 	spentKey := fmt.Sprintf("budget:%s:%s:spent", scope, entityID)
 
-	result, err := checkBudgetScript.Run(ctx, e.rdb,
+	result, err := checkAndReserveBudgetScript.Run(ctx, e.rdb,
 		[]string{limitKey, spentKey},
+		estimatedCost,
 	).Int64()
 	if err != nil {
 		// Redis error — use fail-open/fail-closed policy.
@@ -87,6 +95,20 @@ func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string) (bool, error)
 	default:
 		return true, nil
 	}
+}
+
+// AdjustReservation reconciles a prior budget reservation with the actual cost.
+// Pass (actualCost - estimatedCost) as diff: positive adds spend, negative refunds.
+func (e *Enforcer) AdjustReservation(scope BudgetScope, entityID string, diff float64) error {
+	if e.rdb == nil || diff == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	spentKey := fmt.Sprintf("budget:%s:%s:spent", scope, entityID)
+	return e.rdb.IncrByFloat(ctx, spentKey, diff).Err()
 }
 
 // RecordSpend updates the spend for a given entity after a successful request.

@@ -66,9 +66,11 @@ jobs:
       - name: Extract research topic
         if: steps.check-perms.outputs.has_access == 'true'
         id: topic
+        env:
+          # SECURITY: Pass user input via env var to prevent script injection.
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           # Extract everything after "@claude research"
-          COMMENT_BODY='${{ github.event.comment.body }}'
           TOPIC=$(echo "$COMMENT_BODY" | sed -n 's/.*@claude research[[:space:]]*//p')
           echo "topic=$TOPIC" >> $GITHUB_OUTPUT
 
@@ -93,7 +95,7 @@ jobs:
       - name: Run Claude Research
         if: steps.check-perms.outputs.has_access == 'true'
         id: research
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
@@ -210,6 +212,14 @@ jobs:
             }
             core.setOutput('has_access', 'true');
 
+            // Get PR head ref (github.head_ref is undefined for issue_comment events)
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number
+            });
+            core.setOutput('head_ref', pr.head.ref);
+
             // Get recent comments to find the research summary
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -272,7 +282,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.head_ref }}
+          ref: ${{ steps.check-perms.outputs.head_ref }}
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Post implementation starting
@@ -295,7 +305,7 @@ jobs:
 
       - name: Run Claude Implementation
         if: steps.check-perms.outputs.has_access == 'true' && steps.check-perms.outputs.has_plan == 'true'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
@@ -327,6 +337,8 @@ jobs:
 
       - name: Configure git and push
         if: steps.check-perms.outputs.has_access == 'true' && steps.check-perms.outputs.has_plan == 'true'
+        env:
+          HEAD_REF: ${{ steps.check-perms.outputs.head_ref }}
         run: |
           git config user.name "Claude Code Bot"
           git config user.email "claude-code-bot@users.noreply.github.com"
@@ -338,7 +350,7 @@ jobs:
             Implemented based on research and review discussion."
 
             for i in 1 2 3 4; do
-              if git push origin HEAD:${{ github.head_ref }}; then
+              if git push origin "HEAD:$HEAD_REF"; then
                 echo "Push successful"
                 break
               else
