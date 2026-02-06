@@ -234,7 +234,10 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 	// Update the record with success
 	completedAt := time.Now().UTC()
 	record.Status = models.RecordStatusCompleted
-	record.SizeBytes = int64(len(archiveData))
+	// Get archive file size from disk (archiveData was removed in streaming refactor)
+	if fi, statErr := os.Stat(archivePath); statErr == nil {
+		record.SizeBytes = fi.Size()
+	}
 	record.ResourceCount = len(allResources)
 	record.StoragePath = storagePath
 	record.DurationMs = completedAt.Sub(record.StartedAt).Milliseconds()
@@ -417,6 +420,9 @@ func createArchive(manifest models.BackupManifest) (string, string, error) {
 		return "", "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+	// Restrict permissions so only the owner can read backup archives
+	// (they may contain Kubernetes Secrets and ConfigMaps)
+	os.Chmod(tmpPath, 0600)
 	defer tmpFile.Close()
 
 	// Hash writer to compute checksum while writing

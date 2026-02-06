@@ -41,6 +41,24 @@ from pkg.database import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# API Key authentication
+# ---------------------------------------------------------------------------
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def require_api_key(
+    api_key: str | None = Security(_api_key_header),
+) -> str:
+    """Validate that requests include an API key."""
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key. Provide X-API-Key header.",
+        )
+    return api_key
+
+
+# ---------------------------------------------------------------------------
 # Shared singletons -- wired at startup via ``configure_routes``
 # ---------------------------------------------------------------------------
 _collector: CostCollector | None = None
@@ -174,7 +192,11 @@ class DashboardOverview(BaseModel):
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
-router = APIRouter(prefix="/api/v1", tags=["economist"])
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["economist"],
+    dependencies=[Depends(require_api_key)],
+)
 
 
 # ===== COSTS ==============================================================

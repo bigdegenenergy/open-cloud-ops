@@ -174,6 +174,7 @@ func (s *LocalStorage) WriteFromFile(ctx context.Context, storagePath, localFile
 		return fmt.Errorf("storage: failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+	os.Chmod(tmpPath, 0600)
 
 	defer func() {
 		if err != nil {

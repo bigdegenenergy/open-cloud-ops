@@ -247,8 +247,19 @@ func estimateTokenCount(text string) int {
 	if len(text) == 0 {
 		return 0
 	}
-	// Rough approximation: 1 token per 4 characters for English
-	return len(text) / 4
+	// Count runes to handle multi-byte characters (CJK, emoji, etc.) correctly.
+	// Non-ASCII characters typically map to 1-2 tokens each rather than ~0.25
+	// tokens/byte that the old len(text)/4 heuristic assumed.
+	ascii, nonASCII := 0, 0
+	for _, r := range text {
+		if r < 128 {
+			ascii++
+		} else {
+			nonASCII++
+		}
+	}
+	// ~4 ASCII chars per token, ~1.5 non-ASCII chars per token
+	return ascii/4 + (nonASCII*2+2)/3
 }
 
 // complexityToMinTier maps complexity to the minimum model tier needed.
