@@ -42,13 +42,39 @@ func NewHandler(
 	}
 }
 
+// APIKeyAuth is a simple Gin middleware that requires a non-empty X-API-Key header.
+func APIKeyAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := c.GetHeader("X-API-Key")
+		if apiKey == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": "Missing API key. Provide X-API-Key header.",
+			})
+			c.Abort()
+			return
+		}
+		if len(apiKey) < 16 {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": "Invalid API key format.",
+			})
+			c.Abort()
+			return
+		}
+		c.Set("api_key", apiKey)
+		c.Next()
+	}
+}
+
 // RegisterRoutes sets up all API routes on the given Gin engine.
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
-	// Service health endpoint
+	// Service health endpoint (unauthenticated)
 	r.GET("/health", h.ServiceHealth)
 
-	// API v1 routes
+	// API v1 routes (require API key)
 	v1 := r.Group("/api/v1")
+	v1.Use(APIKeyAuth())
 	{
 		// Backup job management
 		backups := v1.Group("/backups")
@@ -382,7 +408,7 @@ func (h *Handler) AutoRemediate(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"message":          "auto-remediation complete",
+		"message":           "auto-remediation complete",
 		"backups_triggered": triggered,
 	})
 }

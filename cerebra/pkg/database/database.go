@@ -140,7 +140,21 @@ func (db *DB) initSchema(ctx context.Context) error {
 		timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
+	-- API keys table for proper secret-based authentication
+	CREATE TABLE IF NOT EXISTS api_keys (
+		id          TEXT PRIMARY KEY,
+		key_prefix  TEXT NOT NULL,
+		key_hash    TEXT NOT NULL,
+		entity_id   TEXT NOT NULL,
+		entity_type TEXT NOT NULL DEFAULT 'organization',
+		description TEXT NOT NULL DEFAULT '',
+		revoked     BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_used   TIMESTAMPTZ
+	);
+
 	-- Create indexes for common query patterns
+	CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (key_prefix) WHERE revoked = false;
 	CREATE INDEX IF NOT EXISTS idx_api_requests_timestamp ON api_requests (timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_api_requests_agent_id ON api_requests (agent_id, timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_api_requests_team_id ON api_requests (team_id, timestamp DESC);

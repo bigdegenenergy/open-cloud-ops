@@ -29,8 +29,13 @@ FROM alpine:3.19
 # Install CA certificates for HTTPS calls to cloud providers
 RUN apk --no-cache add ca-certificates
 
+# Create non-root user
+RUN adduser -D -u 1001 appuser
+
 # Copy the compiled binary from the builder stage
 COPY --from=builder /app/aegis /usr/local/bin/
+
+USER appuser
 
 EXPOSE 8082
 

@@ -258,6 +258,21 @@ CREATE TABLE IF NOT EXISTS health_checks (
     checked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- API keys for authentication (shared across modules)
+CREATE TABLE IF NOT EXISTS api_keys (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    key_prefix      VARCHAR(8) NOT NULL,
+    key_hash        VARCHAR(64) NOT NULL,
+    entity_id       UUID NOT NULL,
+    entity_type     VARCHAR(50) NOT NULL DEFAULT 'organization',
+    description     TEXT DEFAULT '',
+    revoked         BOOLEAN DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used       TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (key_prefix) WHERE revoked = false;
+
 -- =============================================================================
 -- TimescaleDB Hypertables (for time-series data)
 -- =============================================================================

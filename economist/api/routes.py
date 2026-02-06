@@ -16,7 +16,8 @@ from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -183,12 +184,8 @@ router = APIRouter(prefix="/api/v1", tags=["economist"])
 async def get_cost_summary(
     provider: Optional[str] = Query(None, description="Filter by provider"),
     service: Optional[str] = Query(None, description="Filter by service"),
-    start_date: Optional[str] = Query(
-        None, description="Start date (YYYY-MM-DD)"
-    ),
-    end_date: Optional[str] = Query(
-        None, description="End date (YYYY-MM-DD)"
-    ),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     db: Session = Depends(get_session),
 ) -> CostSummaryResponse:
     """Return an aggregated cost summary with optional filters."""
@@ -341,7 +338,9 @@ async def trigger_cost_collection(
 
 @router.get("/recommendations", response_model=list[RecommendationResponse])
 async def list_recommendations(
-    status: Optional[str] = Query(None, description="Filter by status (open, resolved)"),
+    status: Optional[str] = Query(
+        None, description="Filter by status (open, resolved)"
+    ),
     recommendation_type: Optional[str] = Query(None),
     provider: Optional[str] = Query(None),
     min_savings: Optional[float] = Query(None, ge=0),
@@ -405,9 +404,7 @@ async def list_policies(
 ) -> list[PolicyResponse]:
     """List governance policies."""
     if _policy_engine is None:
-        raise HTTPException(
-            status_code=503, detail="Policy engine not initialized"
-        )
+        raise HTTPException(status_code=503, detail="Policy engine not initialized")
     policies = _policy_engine.list_policies(db, enabled_only=enabled_only)
     return [PolicyResponse(**p.to_dict()) for p in policies]
 
@@ -419,9 +416,7 @@ async def create_policy(
 ) -> PolicyResponse:
     """Create a new governance policy."""
     if _policy_engine is None:
-        raise HTTPException(
-            status_code=503, detail="Policy engine not initialized"
-        )
+        raise HTTPException(status_code=503, detail="Policy engine not initialized")
     try:
         policy = _policy_engine.create_policy(
             name=body.name,
@@ -448,9 +443,7 @@ async def update_policy(
 ) -> PolicyResponse:
     """Update an existing governance policy."""
     if _policy_engine is None:
-        raise HTTPException(
-            status_code=503, detail="Policy engine not initialized"
-        )
+        raise HTTPException(status_code=503, detail="Policy engine not initialized")
 
     updates = body.model_dump(exclude_unset=True)
     policy = _policy_engine.update_policy(policy_id, updates, db)
@@ -493,17 +486,13 @@ async def get_dashboard_overview(
     """Combined dashboard data endpoint."""
     # Total cost (last 30 days)
     thirty_days_ago = date.today() - timedelta(days=30)
-    cost_rows = (
-        db.query(CloudCost).filter(CloudCost.date >= thirty_days_ago).all()
-    )
+    cost_rows = db.query(CloudCost).filter(CloudCost.date >= thirty_days_ago).all()
     cost_dicts = [r.to_dict() for r in cost_rows]
     total_cost = sum(c.get("cost_usd", 0) for c in cost_dicts)
 
     # Trend
     sixty_days_ago = date.today() - timedelta(days=60)
-    trend_rows = (
-        db.query(CloudCost).filter(CloudCost.date >= sixty_days_ago).all()
-    )
+    trend_rows = db.query(CloudCost).filter(CloudCost.date >= sixty_days_ago).all()
     trend_dicts = [r.to_dict() for r in trend_rows]
     trend_data = calculate_trend(trend_dicts, 30)
 
@@ -523,14 +512,10 @@ async def get_dashboard_overview(
 
     # Policies & violations
     active_policies = (
-        db.query(GovernancePolicy)
-        .filter(GovernancePolicy.enabled.is_(True))
-        .count()
+        db.query(GovernancePolicy).filter(GovernancePolicy.enabled.is_(True)).count()
     )
     open_violations = (
-        db.query(PolicyViolation)
-        .filter(PolicyViolation.resolved_at.is_(None))
-        .count()
+        db.query(PolicyViolation).filter(PolicyViolation.resolved_at.is_(None)).count()
     )
 
     return DashboardOverview(

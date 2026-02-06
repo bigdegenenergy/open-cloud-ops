@@ -12,8 +12,13 @@ WORKDIR /app
 COPY economist/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create non-root user
+RUN useradd -r -u 1001 appuser
+
 # Copy application source
 COPY economist/ .
+
+USER appuser
 
 EXPOSE 8081
 

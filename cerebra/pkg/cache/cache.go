@@ -105,26 +105,41 @@ func (c *Cache) GetBudgetSpend(ctx context.Context, scope, entityID string) (flo
 	return spend, nil
 }
 
+// incrWithExpireLua atomically increments a key and sets TTL if the key has no expiry.
+var incrWithExpireLua = redis.NewScript(`
+	local newval = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
+	if redis.call('TTL', KEYS[1]) == -1 then
+		redis.call('EXPIRE', KEYS[1], ARGV[2])
+	end
+	return newval
+`)
+
 // IncrBudgetSpend atomically increments the budget spend for a given scope and entity.
-// It uses INCRBYFLOAT for atomic updates and sets a 31-day TTL on first creation
-// to automatically clean up stale budget data after a billing cycle.
+// It uses a Lua script to atomically INCRBYFLOAT and set TTL in a single round-trip,
+// preventing race conditions between the increment and expiry operations.
 func (c *Cache) IncrBudgetSpend(ctx context.Context, scope, entityID string, amount float64) (float64, error) {
 	key := budgetKey(scope, entityID)
+	ttlSeconds := int(31 * 24 * time.Hour / time.Second) // 31 days
 
-	// Atomically increment the spend
-	newVal, err := c.client.IncrByFloat(ctx, key, amount).Result()
+	result, err := incrWithExpireLua.Run(ctx, c.client, []string{key},
+		strconv.FormatFloat(amount, 'f', 10, 64), ttlSeconds).Result()
 	if err != nil {
 		return 0, fmt.Errorf("cache: incr budget spend %q: %w", key, err)
 	}
 
-	// Set TTL if this is a new key (TTL returns -1 for keys without expiry, -2 for missing)
-	ttl, err := c.client.TTL(ctx, key).Result()
-	if err == nil && (ttl == -1*time.Second || ttl < 0) {
-		// Set a 31-day expiry to cover a full billing month plus buffer
-		c.client.Expire(ctx, key, 31*24*time.Hour)
+	// Parse the result (Lua returns string for INCRBYFLOAT)
+	switch v := result.(type) {
+	case string:
+		newVal, parseErr := strconv.ParseFloat(v, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("cache: parse incr result %q: %w", v, parseErr)
+		}
+		return newVal, nil
+	case float64:
+		return v, nil
+	default:
+		return 0, fmt.Errorf("cache: unexpected result type from Lua script")
 	}
-
-	return newVal, nil
 }
 
 // SetBudgetSpend directly sets the budget spend for a given scope and entity.

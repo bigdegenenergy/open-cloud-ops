@@ -4,6 +4,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"strings"
@@ -131,9 +133,16 @@ func RateLimitMiddleware(c *cache.Cache, maxRequests int64, window time.Duration
 	}
 }
 
+// hashAPIKey returns the hex-encoded SHA-256 hash of the given API key.
+func hashAPIKey(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
+}
+
 // AuthMiddleware returns a Gin middleware handler that validates the X-API-Key header
-// against the organizations table in the database. Keys that are not found in the
-// database are rejected. Results are cached in Redis to avoid repeated DB lookups.
+// against the api_keys table in the database. Keys are validated by looking up
+// the key_prefix (first 8 chars) and comparing the full SHA-256 hash.
+// Results are cached in Redis using the hash (not the raw key) as the cache key.
 func AuthMiddleware(pool *pgxpool.Pool, redisCache *cache.Cache) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-API-Key")
@@ -155,7 +164,7 @@ func AuthMiddleware(pool *pgxpool.Pool, redisCache *cache.Cache) gin.HandlerFunc
 			return
 		}
 
-		// Format validation
+		// Format validation: keys must be at least 16 chars to have a prefix + secret
 		if len(apiKey) < 16 {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error":   "unauthorized",
@@ -165,35 +174,33 @@ func AuthMiddleware(pool *pgxpool.Pool, redisCache *cache.Cache) gin.HandlerFunc
 			return
 		}
 
+		keyHash := hashAPIKey(apiKey)
+		// Use hash-based cache key (never store raw key in cache)
+		cacheKey := "auth:" + keyHash[:16]
+
 		// Check Redis cache first for previously validated keys
 		if redisCache != nil {
-			valid, err := redisCache.Get(c.Request.Context(), "apikey:"+apiKey)
-			if err == nil && valid != "" {
+			entityID, err := redisCache.Get(c.Request.Context(), cacheKey)
+			if err == nil && entityID != "" {
 				c.Set("api_key", apiKey)
+				c.Set("entity_id", entityID)
 				c.Next()
 				return
 			}
 		}
 
-		// Validate against the database
+		// Validate against the api_keys table
 		if pool != nil {
-			var orgID string
+			var entityID, storedHash string
 			err := pool.QueryRow(
 				c.Request.Context(),
-				`SELECT id FROM organizations WHERE id = $1 LIMIT 1`,
-				apiKey,
-			).Scan(&orgID)
+				`SELECT entity_id, key_hash FROM api_keys
+				 WHERE key_prefix = $1 AND revoked = false
+				 LIMIT 1`,
+				apiKey[:8],
+			).Scan(&entityID, &storedHash)
 
-			if err != nil {
-				// Also check the agents table as a fallback
-				err = pool.QueryRow(
-					c.Request.Context(),
-					`SELECT id FROM agents WHERE id = $1 LIMIT 1`,
-					apiKey,
-				).Scan(&orgID)
-			}
-
-			if err != nil {
+			if err != nil || storedHash != keyHash {
 				c.JSON(http.StatusUnauthorized, gin.H{
 					"error":   "unauthorized",
 					"message": "Invalid API key.",
@@ -205,12 +212,14 @@ func AuthMiddleware(pool *pgxpool.Pool, redisCache *cache.Cache) gin.HandlerFunc
 			// Cache the validated key in Redis for 5 minutes
 			if redisCache != nil {
 				ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-				_ = redisCache.Set(ctx, "apikey:"+apiKey, "1", 5*time.Minute)
+				_ = redisCache.Set(ctx, cacheKey, entityID, 5*time.Minute)
 				cancel()
 			}
+
+			c.Set("api_key", apiKey)
+			c.Set("entity_id", entityID)
 		}
 
-		c.Set("api_key", apiKey)
 		c.Next()
 	}
 }

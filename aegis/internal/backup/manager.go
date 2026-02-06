@@ -2,14 +2,15 @@ package backup
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -36,9 +37,9 @@ type KubeClient interface {
 // BackupManager orchestrates backup operations including job management,
 // execution, scheduling, and retention enforcement.
 type BackupManager struct {
-	kubeClient   KubeClient
-	storage      StorageBackend
-	storagePath  string
+	kubeClient    KubeClient
+	storage       StorageBackend
+	storagePath   string
 	retentionDays int
 
 	mu      sync.RWMutex
@@ -408,11 +409,22 @@ func (m *BackupManager) LoadManifest(ctx context.Context, recordID string) (*mod
 
 // createArchive builds a tar.gz archive containing the serialized resources
 // and returns the archive bytes and its SHA-256 checksum.
+// It streams through a temp file to avoid unbounded memory usage on large backups.
 func createArchive(manifest models.BackupManifest) ([]byte, string, error) {
-	var buf bytes.Buffer
+	// Use a temp file to avoid holding the entire archive in memory
+	tmpFile, err := os.CreateTemp("", "aegis-backup-*.tar.gz")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Hash writer to compute checksum while writing
+	hashWriter := sha256.New()
+	multiWriter := io.MultiWriter(tmpFile, hashWriter)
 
 	// Create gzip writer
-	gzWriter := gzip.NewWriter(&buf)
+	gzWriter := gzip.NewWriter(multiWriter)
 	gzWriter.Comment = fmt.Sprintf("Aegis backup %s", manifest.BackupID)
 	gzWriter.ModTime = manifest.CreatedAt
 
@@ -476,11 +488,17 @@ func createArchive(manifest models.BackupManifest) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
-	archiveData := buf.Bytes()
+	// Calculate checksum from the hash writer
+	checksum := hex.EncodeToString(hashWriter.Sum(nil))
 
-	// Calculate checksum
-	hash := sha256.Sum256(archiveData)
-	checksum := hex.EncodeToString(hash[:])
+	// Read the archive back from the temp file
+	if _, err := tmpFile.Seek(0, 0); err != nil {
+		return nil, "", fmt.Errorf("failed to seek temp file: %w", err)
+	}
+	archiveData, err := io.ReadAll(tmpFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read temp file: %w", err)
+	}
 
 	return archiveData, checksum, nil
 }
@@ -506,7 +524,7 @@ func calculateNextRun(schedule string, from time.Time) time.Time {
 		if daysUntilMonday == 0 {
 			daysUntilMonday = 7
 		}
-		return from.Truncate(24 * time.Hour).AddDate(0, 0, daysUntilMonday)
+		return from.Truncate(24*time.Hour).AddDate(0, 0, daysUntilMonday)
 	default:
 		// Parse simple "*/N * * * *" format (every N minutes)
 		if strings.HasPrefix(schedule, "*/") {

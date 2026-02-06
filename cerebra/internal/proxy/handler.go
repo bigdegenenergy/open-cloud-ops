@@ -85,10 +85,12 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 		return
 	}
 
-	// 2. Read the request body and parse JSON to extract the model name
+	// 2. Read the request body (bounded to 10MB to prevent DoS) and parse JSON to extract the model name
+	const maxBodySize = 10 * 1024 * 1024 // 10MB
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodySize)
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large (max 10MB)"})
 		return
 	}
 	c.Request.Body.Close()

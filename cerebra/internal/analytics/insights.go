@@ -55,11 +55,11 @@ const SpikeThreshold = 2.0
 
 // premiumModelAlternatives maps premium models to cheaper alternatives for recommendation.
 var premiumModelAlternatives = map[string]string{
-	"gpt-4-turbo":              "gpt-4o",
-	"gpt-4":                    "gpt-4o",
-	"o1":                       "gpt-4o",
-	"claude-3-opus-20240229":   "claude-3-5-sonnet-20241022",
-	"gemini-ultra":             "gemini-1.5-pro",
+	"gpt-4-turbo":            "gpt-4o",
+	"gpt-4":                  "gpt-4o",
+	"o1":                     "gpt-4o",
+	"claude-3-opus-20240229": "claude-3-5-sonnet-20241022",
+	"gemini-ultra":           "gemini-1.5-pro",
 }
 
 // InsightsEngine generates and manages cost insights.
@@ -284,7 +284,17 @@ func (e *InsightsEngine) GenerateReport(from, to time.Time) ([]models.CostSummar
 		{"provider", "provider", "provider"},
 	}
 
+	// Allowlist of valid column names to prevent SQL injection
+	validColumns := map[string]bool{
+		"agent_id": true, "team_id": true, "model": true, "provider": true,
+	}
+
 	for _, dim := range dimensions {
+		if !validColumns[dim.idCol] || !validColumns[dim.nameCol] {
+			log.Printf("analytics: skipping invalid dimension column: %s", dim.idCol)
+			continue
+		}
+
 		query := fmt.Sprintf(`
 			SELECT
 				%s AS dimension_id,
