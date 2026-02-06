@@ -36,32 +36,26 @@ func NewEnforcer(rdb *redis.Client) *Enforcer {
 	return &Enforcer{rdb: rdb}
 }
 
-// checkBudgetScript atomically checks budget and increments spend if allowed.
-// Returns: 1 if allowed (and spend incremented), 0 if budget exceeded, -1 if no limit set.
+// checkBudgetScript checks if the entity's spend has reached its budget limit.
+// Returns: 1 if allowed, 0 if budget exhausted, -1 if no limit configured.
+// This is a read-only check — spend is recorded separately by RecordSpend after
+// the response completes and the actual cost is known.
 var checkBudgetScript = redis.NewScript(`
 local limit = redis.call('GET', KEYS[1])
 if not limit then
 	return -1
 end
-limit = tonumber(limit)
 local spent = tonumber(redis.call('GET', KEYS[2]) or '0')
-local cost = tonumber(ARGV[1])
-if spent + cost > limit then
+if spent >= tonumber(limit) then
 	return 0
-end
-if cost > 0 then
-	redis.call('INCRBYFLOAT', KEYS[2], ARGV[1])
-	local ttl = redis.call('TTL', KEYS[2])
-	if ttl < 0 then
-		redis.call('EXPIRE', KEYS[2], ARGV[2])
-	end
 end
 return 1
 `)
 
 // CheckBudget verifies whether the given entity has remaining budget.
 // Returns true if the request is allowed, false if the budget is exhausted.
-func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string, estimatedCostUSD float64) (bool, error) {
+// This is a pre-flight check only; actual cost is unknown until after the response.
+func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string) (bool, error) {
 	if e.rdb == nil {
 		// No Redis available — allow all requests (graceful degradation).
 		return true, nil
@@ -73,12 +67,8 @@ func (e *Enforcer) CheckBudget(scope BudgetScope, entityID string, estimatedCost
 	limitKey := fmt.Sprintf("budget:%s:%s:limit", scope, entityID)
 	spentKey := fmt.Sprintf("budget:%s:%s:spent", scope, entityID)
 
-	// Default spend TTL: 30 days (matches budget period).
-	spendTTLSec := int64(30 * 24 * 3600)
-
 	result, err := checkBudgetScript.Run(ctx, e.rdb,
 		[]string{limitKey, spentKey},
-		estimatedCostUSD, spendTTLSec,
 	).Int64()
 	if err != nil {
 		return true, fmt.Errorf("checking budget: %w", err)

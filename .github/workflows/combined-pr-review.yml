@@ -516,8 +516,10 @@ jobs:
       # This prevents untrusted PR code from executing with write permissions.
       - name: Extract trusted combine script
         id: extract-script
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git show ${{ github.event.pull_request.base.sha }}:.github/scripts/combine_reviews.py > /tmp/combine_reviews.py 2>/dev/null; then
+          if git show "${BASE_SHA}:.github/scripts/combine_reviews.py" > /tmp/combine_reviews.py 2>/dev/null; then
             echo "Using combine script from base ref (trusted)"
             echo "available=true" >> $GITHUB_OUTPUT
           else
@@ -603,9 +605,10 @@ jobs:
         if: steps.extract-script.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          PR_NUMBER="${{ github.event.pull_request.number }}"
           gh pr comment "$PR_NUMBER" --body-file /tmp/combined-comment.md || echo "Comment failed"
 
       # Skip push for forked PRs - we can't push to external forks.

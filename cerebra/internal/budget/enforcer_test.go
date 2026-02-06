@@ -14,7 +14,7 @@ func TestNewEnforcer_NilRedis(t *testing.T) {
 func TestCheckBudget_NilRedis_AllowsAll(t *testing.T) {
 	e := NewEnforcer(nil)
 
-	allowed, err := e.CheckBudget(ScopeAgent, "test-agent", 100.0)
+	allowed, err := e.CheckBudget(ScopeAgent, "test-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

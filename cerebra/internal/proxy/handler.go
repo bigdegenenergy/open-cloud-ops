@@ -115,8 +115,8 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 
 	model := extractModel(body, provider)
 
-	// 3. Check budget before forwarding.
-	allowed, err := h.enforcer.CheckBudget(budget.ScopeAgent, agentID, 0)
+	// 3. Check budget before forwarding (pre-flight, cost unknown until response).
+	allowed, err := h.enforcer.CheckBudget(budget.ScopeAgent, agentID)
 	if err != nil {
 		log.Printf("[%s] budget check error: %v", reqID, err)
 	}
@@ -219,7 +219,10 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 }
 
-// streamResponse streams SSE responses directly to the client without buffering.
+// streamResponse streams SSE responses to the client while capturing data for
+// post-stream cost tracking. A capped buffer accumulates the streamed data so
+// token usage can be extracted from the final SSE chunks (providers typically
+// include usage metadata in their final message_delta / usage chunk).
 func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID string, provider Provider, model, agentID, teamID, orgID string, start time.Time) {
 	// Forward response headers.
 	for key, vals := range resp.Header {
@@ -230,39 +233,127 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 	c.Header("X-Request-ID", reqID)
 	c.Status(resp.StatusCode)
 
-	// Stream data to client.
+	// Capture streamed data (cap at 1MB to avoid OOM on long streams).
+	// We only need the final chunks which contain usage metadata.
+	const maxCapture = 1 << 20 // 1 MB
+	var captured bytes.Buffer
+
+	// Stream data to client while tee-ing to captured buffer.
 	c.Stream(func(w io.Writer) bool {
 		buf := make([]byte, 4096)
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			w.Write(buf[:n])
+			// Keep only the tail of the stream (last maxCapture bytes).
+			if captured.Len()+n <= maxCapture {
+				captured.Write(buf[:n])
+			} else {
+				// Once we exceed cap, only keep the latest data.
+				captured.Reset()
+				captured.Write(buf[:n])
+			}
 		}
 		return err == nil
 	})
 
 	latency := time.Since(start).Milliseconds()
 
-	// Record the streaming request (token counts unavailable for streamed responses).
+	// Parse token usage from captured stream data.
+	inputTokens, outputTokens := extractStreamTokenUsage(captured.Bytes(), provider)
+	totalTokens := inputTokens + outputTokens
+	costUSD := h.calculateCost(context.Background(), string(provider), model, inputTokens, outputTokens)
+
+	// Record the streaming request and spend.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		apiReq := &models.APIRequest{
-			ID:         reqID,
-			Provider:   models.LLMProvider(provider),
-			Model:      model,
-			AgentID:    agentID,
-			TeamID:     teamID,
-			OrgID:      orgID,
-			LatencyMs:  latency,
-			StatusCode: resp.StatusCode,
-			Timestamp:  time.Now(),
+			ID:           reqID,
+			Provider:     models.LLMProvider(provider),
+			Model:        model,
+			AgentID:      agentID,
+			TeamID:       teamID,
+			OrgID:        orgID,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			TotalTokens:  totalTokens,
+			CostUSD:      costUSD,
+			LatencyMs:    latency,
+			StatusCode:   resp.StatusCode,
+			Timestamp:    time.Now(),
 		}
 		if h.db != nil {
 			if err := h.db.InsertRequest(ctx, apiReq); err != nil {
 				log.Printf("[%s] failed to record streaming request: %v", reqID, err)
 			}
 		}
+		if err := h.enforcer.RecordSpend(budget.ScopeAgent, agentID, costUSD); err != nil {
+			log.Printf("[%s] failed to record streaming spend: %v", reqID, err)
+		}
 	}()
+}
+
+// extractStreamTokenUsage parses SSE stream data to find usage metadata.
+// LLM providers include token usage in their final streaming chunks:
+//   - OpenAI: data: {"usage":{"prompt_tokens":N,"completion_tokens":N}} (when stream_options.include_usage is set)
+//   - Anthropic: data: {"type":"message_delta","usage":{"output_tokens":N}}
+func extractStreamTokenUsage(data []byte, provider Provider) (int64, int64) {
+	// Scan SSE lines for "data: " prefixed JSON containing usage info.
+	lines := strings.Split(string(data), "\n")
+	var inputTokens, outputTokens int64
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		jsonData := strings.TrimPrefix(line, "data: ")
+		if jsonData == "[DONE]" {
+			continue
+		}
+
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonData), &parsed); err != nil {
+			continue
+		}
+
+		switch provider {
+		case ProviderOpenAI:
+			if usage, ok := parsed["usage"].(map[string]interface{}); ok {
+				if v := toFloat(usage["prompt_tokens"]); v > 0 {
+					inputTokens = int64(v)
+				}
+				if v := toFloat(usage["completion_tokens"]); v > 0 {
+					outputTokens = int64(v)
+				}
+			}
+		case ProviderAnthropic:
+			// Anthropic sends input_tokens in message_start, output_tokens in message_delta.
+			if msg, ok := parsed["message"].(map[string]interface{}); ok {
+				if usage, ok := msg["usage"].(map[string]interface{}); ok {
+					if v := toFloat(usage["input_tokens"]); v > 0 {
+						inputTokens = int64(v)
+					}
+				}
+			}
+			if usage, ok := parsed["usage"].(map[string]interface{}); ok {
+				if v := toFloat(usage["output_tokens"]); v > 0 {
+					outputTokens = int64(v)
+				}
+			}
+		case ProviderGemini:
+			if meta, ok := parsed["usageMetadata"].(map[string]interface{}); ok {
+				if v := toFloat(meta["promptTokenCount"]); v > 0 {
+					inputTokens = int64(v)
+				}
+				if v := toFloat(meta["candidatesTokenCount"]); v > 0 {
+					outputTokens = int64(v)
+				}
+			}
+		}
+	}
+
+	return inputTokens, outputTokens
 }
 
 // setProviderAuth sets the appropriate authentication header for each provider.

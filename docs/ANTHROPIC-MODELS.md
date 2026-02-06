@@ -2,17 +2,17 @@
 
 This document provides the official model IDs for Claude models used in this repository.
 
-## Claude 4.5 Family (Current)
+## Claude Model Family (Current)
 
 | Model                 | Model ID                     | Release Date   | Use Case                                               |
 | --------------------- | ---------------------------- | -------------- | ------------------------------------------------------ |
-| **Claude 4.5 Opus**   | `claude-opus-4-5-20251101`   | November 2025  | Complex reasoning, architecture, code review, planning |
+| **Claude Opus 4.6**   | `claude-opus-4-6`            | 2025           | Complex reasoning, architecture, code review, planning |
 | **Claude 4.5 Sonnet** | `claude-sonnet-4-5-20250929` | September 2025 | Balanced performance, general coding tasks             |
 | **Claude 4.5 Haiku**  | `claude-haiku-4-5-20251001`  | October 2025   | Fast tasks, simple parsing, comment analysis           |
 
 ## Model Selection Guidelines
 
-### When to Use Opus (`claude-opus-4-5-20251101`)
+### When to Use Opus (`claude-opus-4-6`)
 
 - Complex architectural decisions
 - Security audits and code reviews
@@ -63,7 +63,7 @@ This document provides the official model IDs for Claude models used in this rep
 ---
 name: my-command
 description: Description of the command
-model: claude-opus-4-5-20251101
+model: claude-opus-4-6
 ---
 ```
 
@@ -74,7 +74,7 @@ model: claude-opus-4-5-20251101
 name: my-agent
 description: Description of the agent
 tools: Read, Edit, Grep, Glob
-model: claude-opus-4-5-20251101
+model: claude-opus-4-6
 ---
 ```
 
@@ -85,7 +85,7 @@ model: claude-opus-4-5-20251101
   with:
     anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     claude_args: |
-      --model claude-opus-4-5-20251101
+      --model claude-opus-4-6
 ```
 
 ### In API Calls
@@ -106,7 +106,7 @@ curl -s "https://api.anthropic.com/v1/messages" \
 
 ```json
 {
-  "model": "claude-opus-4-5-20251101"
+  "model": "claude-opus-4-6"
 }
 ```
 
@@ -114,10 +114,10 @@ curl -s "https://api.anthropic.com/v1/messages" \
 
 ```toml
 [agent.identity]
-model_preference = "claude-opus-4-5-20251101"
+model_preference = "claude-opus-4-6"
 
 [best_practices.model_selection]
-default = "claude-opus-4-5-20251101"
+default = "claude-opus-4-6"
 ```
 
 ## Model ID Format
