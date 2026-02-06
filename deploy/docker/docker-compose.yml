@@ -1,0 +1,211 @@
+# =============================================================================
+# Open Cloud Ops - Full Stack Docker Compose
+# =============================================================================
+# Brings up all three application services plus supporting infrastructure.
+#
+# Usage:
+#   docker-compose up -d              # start everything
+#   docker-compose up -d postgres redis  # infrastructure only
+#   docker-compose down               # stop everything
+#   docker-compose logs -f cerebra    # tail logs for one service
+#
+# Environment variables are loaded from .env in the project root.
+# Copy .env.example to .env before first run.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Application Services
+  # ---------------------------------------------------------------------------
+
+  cerebra:
+    build:
+      context: ../../
+      dockerfile: deploy/docker/Dockerfile.cerebra
+    container_name: oco-cerebra
+    ports:
+      - "${CEREBRA_PORT:-8080}:8080"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-opencloudops}
+      - POSTGRES_USER=${POSTGRES_USER:-oco_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me_to_a_strong_password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - CEREBRA_PORT=8080
+      - CEREBRA_LOG_LEVEL=${CEREBRA_LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - oco-network
+    restart: unless-stopped
+
+  economist:
+    build:
+      context: ../../
+      dockerfile: deploy/docker/Dockerfile.economist
+    container_name: oco-economist
+    ports:
+      - "${ECONOMIST_PORT:-8081}:8081"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-opencloudops}
+      - POSTGRES_USER=${POSTGRES_USER:-oco_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me_to_a_strong_password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - ECONOMIST_PORT=8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - oco-network
+    restart: unless-stopped
+
+  aegis:
+    build:
+      context: ../../
+      dockerfile: deploy/docker/Dockerfile.aegis
+    container_name: oco-aegis
+    ports:
+      - "${AEGIS_PORT:-8082}:8082"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-opencloudops}
+      - POSTGRES_USER=${POSTGRES_USER:-oco_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me_to_a_strong_password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - AEGIS_PORT=8082
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - oco-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Infrastructure Services
+  # ---------------------------------------------------------------------------
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: oco-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-opencloudops}
+      - POSTGRES_USER=${POSTGRES_USER:-oco_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me_to_a_strong_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oco_user} -d ${POSTGRES_DB:-opencloudops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - oco-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: oco-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - oco-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Observability
+  # ---------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: oco-prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - oco-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: oco-grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - oco-network
+    restart: unless-stopped
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  oco-network:
+    driver: bridge

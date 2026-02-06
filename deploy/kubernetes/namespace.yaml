@@ -1,0 +1,10 @@
+# =============================================================================
+# Open Cloud Ops - Kubernetes Namespace
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: open-cloud-ops
+  labels:
+    app.kubernetes.io/part-of: open-cloud-ops
+    app.kubernetes.io/managed-by: kubectl

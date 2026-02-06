@@ -1,0 +1,112 @@
+# =============================================================================
+# Aegis (Resilience Engine) - Kubernetes Deployment, Service, and ConfigMap
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aegis-config
+  namespace: open-cloud-ops
+  labels:
+    app: aegis
+    app.kubernetes.io/part-of: open-cloud-ops
+data:
+  AEGIS_PORT: "8082"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "opencloudops"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis
+  namespace: open-cloud-ops
+  labels:
+    app: aegis
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/component: resilience-engine
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aegis
+  template:
+    metadata:
+      labels:
+        app: aegis
+        app.kubernetes.io/name: aegis
+        app.kubernetes.io/component: resilience-engine
+        app.kubernetes.io/part-of: open-cloud-ops
+    spec:
+      containers:
+        - name: aegis
+          image: open-cloud-ops/aegis:latest
+          ports:
+            - containerPort: 8082
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: aegis-config
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oco-redis-credentials
+                  key: password
+                  optional: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "125m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aegis
+  namespace: open-cloud-ops
+  labels:
+    app: aegis
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/component: resilience-engine
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  type: ClusterIP
+  selector:
+    app: aegis
+  ports:
+    - port: 8082
+      targetPort: 8082
+      protocol: TCP
+      name: http

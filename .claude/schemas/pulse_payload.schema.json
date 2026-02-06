@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bigdegenenergy/ai-dev-toolkit/schemas/pulse_payload.schema.json",
+  "title": "Pulse Idea Payload",
+  "description": "Schema for validating Pulse idea payloads processed by the intake command",
+  "type": "object",
+  "required": ["idea_id", "title", "description", "day1_deliverables"],
+  "properties": {
+    "idea_id": {
+      "type": "string",
+      "description": "Unique identifier for the idea",
+      "pattern": "^[A-Z]+-[0-9]+$",
+      "examples": ["IDEA-0042", "FEAT-0001", "PROJ-0123"]
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable name for the idea",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "description": {
+      "type": "string",
+      "description": "Detailed description of what the idea accomplishes",
+      "minLength": 1
+    },
+    "day1_deliverables": {
+      "type": "array",
+      "description": "List of deliverables to complete on the first day",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "technical_approach": {
+      "type": "string",
+      "description": "Optional notes on how to implement the idea"
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "description": "Criteria that must be met for the idea to be considered complete",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "source_url": {
+      "type": "string",
+      "description": "Optional URL linking to the source of the idea",
+      "format": "uri"
+    },
+    "priority": {
+      "type": "string",
+      "description": "Priority level for the idea",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "tags": {
+      "type": "array",
+      "description": "Tags for categorizing the idea",
+      "items": {
+        "type": "string"
+      }
+    },
+    "estimated_effort": {
+      "type": "string",
+      "description": "Estimated effort using t-shirt sizes",
+      "enum": ["XS", "S", "M", "L", "XL"]
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "List of idea IDs that this idea depends on",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z]+-[0-9]+$"
+      }
+    },
+    "_claude": {
+      "type": "object",
+      "description": "Automation control for Claude",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "What action Claude should take",
+          "enum": ["intake", "start", "review"],
+          "default": "intake"
+        },
+        "skip_tests": {
+          "type": "boolean",
+          "description": "Skip test generation during implementation",
+          "default": false
+        },
+        "auto_commit": {
+          "type": "boolean",
+          "description": "Automatically commit after each deliverable",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

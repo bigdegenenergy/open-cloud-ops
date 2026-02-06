@@ -1,0 +1,241 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Run weekly on Sundays at midnight
+    - cron: '0 0 * * 0'
+
+jobs:
+  secrets-scan:
+    name: Scan for Secrets
+    runs-on: ubuntu-latest
+    # Skip commits from github-actions[bot] to prevent infinite loops
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog Secret Scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
+  gitleaks:
+    name: Gitleaks Scan
+    runs-on: ubuntu-latest
+    # Skip commits from github-actions[bot] to prevent infinite loops
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+  shell-security:
+    name: Shell Script Security
+    runs-on: ubuntu-latest
+    # Skip commits from github-actions[bot] to prevent infinite loops
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck Security Analysis
+        run: |
+          sudo apt-get install -y shellcheck
+          find .claude/hooks -name "*.sh" -exec shellcheck -S warning {} \; || true
+
+      - name: Check for dangerous patterns
+        run: |
+          echo "Checking for potentially dangerous patterns in shell scripts..."
+
+          # Check for eval usage
+          if grep -r "eval " .claude/hooks/*.sh 2>/dev/null; then
+            echo "Warning: eval found in shell scripts"
+          fi
+
+          # Check for curl | bash patterns
+          if grep -rE "curl.*\|.*bash" .claude/hooks/*.sh 2>/dev/null; then
+            echo "Warning: curl pipe to bash found"
+          fi
+
+          # Check for rm -rf with variables
+          if grep -rE "rm -rf.*\\\$" .claude/hooks/*.sh 2>/dev/null; then
+            echo "Warning: rm -rf with variable found"
+          fi
+
+          echo "Security pattern check complete"
+
+  python-security:
+    name: Python Security
+    runs-on: ubuntu-latest
+    # Skip commits from github-actions[bot] to prevent infinite loops
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit Security Scan
+        run: |
+          find .claude/hooks -name "*.py" -exec bandit -ll {} \; || true
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    # Only on PRs and skip commits from github-actions[bot]
+    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v3
+        continue-on-error: true
+
+  pii-scan:
+    name: PII (Personal Information) Scan
+    runs-on: ubuntu-latest
+    # Only run on public repositories (PII in private repos is less critical)
+    # Also skip commits from github-actions[bot] to prevent infinite loops
+    if: github.event.repository.visibility == 'public' && github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for Personal Information
+        run: |
+          echo "🔍 Scanning for Personal Identifiable Information (PII)..."
+          echo ""
+
+          EXIT_CODE=0
+
+          # Get files to scan (exclude binaries, config files, and infrastructure files)
+          # These exclusions prevent false positives from:
+          # - Workflow files (contain example PII patterns)
+          # - Config files (contain IDs that look like phone numbers)
+          # - Documentation (contain example patterns)
+          # - Policy/example files (contain test data with timestamps that look like PII)
+          FILES=$(find . -type f \
+            -not -path "./.git/*" \
+            -not -path "./node_modules/*" \
+            -not -path "./vendor/*" \
+            -not -path "./.venv/*" \
+            -not -path "./.github/*" \
+            -not -path "./.claude/*" \
+            -not -path "./docs/onefilellm/*" \
+            -not -path "./policies/*" \
+            -not -path "./examples/*" \
+            -not -path "./profiles/*" \
+            -not -path "./scripts/*" \
+            -not -path "./clients/*" \
+            -not -name "*.png" -not -name "*.jpg" -not -name "*.jpeg" \
+            -not -name "*.gif" -not -name "*.ico" -not -name "*.svg" \
+            -not -name "*.woff" -not -name "*.woff2" -not -name "*.ttf" \
+            -not -name "*.pdf" -not -name "*.zip" -not -name "*.tar.gz" \
+            -not -name "*.md" -not -name "*.toml" -not -name "*.yml" -not -name "*.yaml" \
+            2>/dev/null)
+
+          # IMPORTANT: All PII patterns FAIL because this is a public repo.
+          # Once committed, data is permanently in git history and exposed.
+
+          echo "📧 Checking for email addresses..."
+          EMAIL_PATTERN='[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+          EMAIL_EXCLUDES='example\.com|test\.com|localhost|your-?email|user@|email@|foo@|bar@|noreply@|no-reply@|github\.com|users\.noreply\.github\.com'
+          EMAIL_FOUND=$(echo "$FILES" | xargs grep -lE "$EMAIL_PATTERN" 2>/dev/null | while read -r file; do
+            if grep -E "$EMAIL_PATTERN" "$file" 2>/dev/null | grep -vE "$EMAIL_EXCLUDES" | grep -qE "$EMAIL_PATTERN"; then
+              echo "$file"
+            fi
+          done | head -10)
+          if [ -n "$EMAIL_FOUND" ]; then
+            echo "⛔ Email addresses found in:"
+            echo "$EMAIL_FOUND" | sed 's/^/   /'
+            EXIT_CODE=1
+            echo ""
+          fi
+
+          echo "📱 Checking for phone numbers..."
+          PHONE_PATTERN='\+?1?[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}'
+          PHONE_FOUND=$(echo "$FILES" | xargs grep -lE "$PHONE_PATTERN" 2>/dev/null | head -5)
+          if [ -n "$PHONE_FOUND" ]; then
+            echo "⛔ Phone number patterns found in:"
+            echo "$PHONE_FOUND" | sed 's/^/   /'
+            EXIT_CODE=1
+            echo ""
+          fi
+
+          echo "🔐 Checking for SSN patterns..."
+          SSN_PATTERN='[0-9]{3}-[0-9]{2}-[0-9]{4}'
+          SSN_FOUND=$(echo "$FILES" | xargs grep -lE "$SSN_PATTERN" 2>/dev/null | head -5)
+          if [ -n "$SSN_FOUND" ]; then
+            echo "⛔ SSN patterns found in:"
+            echo "$SSN_FOUND" | sed 's/^/   /'
+            EXIT_CODE=1
+            echo ""
+          fi
+
+          echo "💳 Checking for credit card patterns..."
+          CC_PATTERN='[3-6][0-9]{3}[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}'
+          CC_FOUND=$(echo "$FILES" | xargs grep -lE "$CC_PATTERN" 2>/dev/null | head -5)
+          if [ -n "$CC_FOUND" ]; then
+            echo "⛔ Credit card patterns found in:"
+            echo "$CC_FOUND" | sed 's/^/   /'
+            EXIT_CODE=1
+            echo ""
+          fi
+
+          echo "🌐 Checking for public IP addresses..."
+          IP_PATTERN='[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
+          IP_EXCLUDES='127\.0\.0\.1|0\.0\.0\.0|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.'
+          IP_FOUND=$(echo "$FILES" | xargs grep -lE "$IP_PATTERN" 2>/dev/null | while read -r file; do
+            if grep -E "$IP_PATTERN" "$file" 2>/dev/null | grep -vE "$IP_EXCLUDES" | grep -qE "$IP_PATTERN"; then
+              echo "$file"
+            fi
+          done | head -5)
+          if [ -n "$IP_FOUND" ]; then
+            echo "⛔ Public IP addresses found in:"
+            echo "$IP_FOUND" | sed 's/^/   /'
+            EXIT_CODE=1
+            echo ""
+          fi
+
+          echo "👤 Checking for full names..."
+          NAME_CONTEXT='(name|author|user|contact|owner|created[_ ]?by|assigned[_ ]?to|submitted[_ ]?by)\s*[:=]?\s*'
+          NAME_PATTERN="[A-Z][a-z]+\s+[A-Z][a-z]+"
+          NAME_EXCLUDES='Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name'
+          NAME_FOUND=$(echo "$FILES" | xargs grep -lE "${NAME_CONTEXT}${NAME_PATTERN}" 2>/dev/null | while read -r file; do
+            if grep -E "${NAME_CONTEXT}${NAME_PATTERN}" "$file" 2>/dev/null | grep -vE "$NAME_EXCLUDES" | grep -qE "${NAME_CONTEXT}${NAME_PATTERN}"; then
+              echo "$file"
+            fi
+          done | head -5)
+          if [ -n "$NAME_FOUND" ]; then
+            echo "⛔ Full names found in:"
+            echo "$NAME_FOUND" | sed 's/^/   /'
+            EXIT_CODE=1
+            echo ""
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ PII scan complete - no issues found"
+          else
+            echo "⛔ PII scan FAILED - personal information detected!"
+            echo "   This is a PUBLIC repository - remove all PII before merging."
+          fi
+
+          exit $EXIT_CODE

@@ -1,0 +1,590 @@
+name: Claude Code Implement Changes
+# Version: 2026-02-03-v12 - Add detailed implementation report showing each review item addressed
+#
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║ MODEL: claude-haiku-4-5-20251001                                          ║
+# ╠═══════════════════════════════════════════════════════════════════════════╣
+# ║ Using Claude 4.5 Haiku for natural language parsing of PR comments.       ║
+# ║ This is the official Anthropic model ID as of October 2025.               ║
+# ║                                                                           ║
+# ║ NEW: Implementation now provides detailed report showing:                 ║
+# ║ - Each review item and its status (FIXED/SKIPPED/MODIFIED)               ║
+# ║ - Files changed for each item                                            ║
+# ║ - What was done and assessment of legitimacy vs false positive           ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to process'
+        required: true
+        type: number
+      accept_all:
+        description: 'Accept all suggestions as-is'
+        required: false
+        default: false
+        type: boolean
+      user_instructions:
+        description: 'Custom instructions for implementation'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: claude-implement-${{ github.event.issue.number || github.event.inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  detect_trigger:
+    name: Detect Implementation Trigger
+    runs-on: ubuntu-latest
+    # IMPORTANT: Only run for human comments, never for bots
+    # Check both actor and comment user type to prevent loops
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       github.event.comment.user.type != 'Bot' &&
+       !contains(github.event.comment.user.login, '[bot]') &&
+       !contains(github.event.comment.user.login, '-bot'))
+    outputs:
+      should_run: ${{ steps.analyze.outputs.should_run }}
+      is_accept: ${{ steps.analyze.outputs.is_accept }}
+      user_instructions: ${{ steps.analyze.outputs.user_instructions }}
+      pr_number: ${{ steps.analyze.outputs.pr_number }}
+      pr_branch: ${{ steps.analyze.outputs.pr_branch }}
+
+    steps:
+      - name: Check access and gather context
+        id: context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isWorkflowDispatch = context.eventName === 'workflow_dispatch';
+
+            // Security: Check if commenter has write access to the repository
+            if (!isWorkflowDispatch) {
+              const authorAssociation = context.payload.comment.author_association;
+              const allowedAssociations = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+              if (!allowedAssociations.includes(authorAssociation)) {
+                console.log(`Access denied: ${context.actor} has association '${authorAssociation}'`);
+                core.setOutput('has_access', 'false');
+                return;
+              }
+              console.log(`Access granted: ${context.actor} has association '${authorAssociation}'`);
+            }
+            core.setOutput('has_access', 'true');
+
+            if (isWorkflowDispatch) {
+              // Manual trigger - no LLM needed
+              const prNumber = parseInt('${{ github.event.inputs.pr_number }}');
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              core.setOutput('is_manual', 'true');
+              core.setOutput('pr_number', prNumber);
+              core.setOutput('pr_branch', pr.head.ref);
+              core.setOutput('accept_all', '${{ github.event.inputs.accept_all }}');
+              core.setOutput('manual_instructions', '${{ github.event.inputs.user_instructions }}');
+              return;
+            }
+
+            core.setOutput('is_manual', 'false');
+            const prNumber = context.payload.issue.number;
+            const commentBody = context.payload.comment.body.trim();
+
+            // Get PR details
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput('pr_number', prNumber);
+            core.setOutput('pr_branch', pr.head.ref);
+            core.setOutput('comment_body', commentBody);
+
+            // Get recent comments for context
+            const { data: allComments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 50
+            });
+
+            // Find comments with Claude Code prompt (either in Gemini review or standalone)
+            const promptComments = allComments.filter(c =>
+              c.body && c.body.includes('<!-- claude-code-prompt:')
+            );
+
+            if (promptComments.length === 0) {
+              console.log('No Claude Code prompt found - skipping LLM analysis');
+              core.setOutput('has_prompt', 'false');
+              return;
+            }
+            core.setOutput('has_prompt', 'true');
+
+            // Get the latest prompt and check if this comment is after it
+            const latestPrompt = promptComments[promptComments.length - 1];
+            const promptIndex = allComments.findIndex(c => c.id === latestPrompt.id);
+            const currentIndex = allComments.findIndex(c => c.id === context.payload.comment.id);
+
+            if (currentIndex <= promptIndex) {
+              console.log('Comment is not after the prompt - skipping');
+              core.setOutput('is_after_prompt', 'false');
+              return;
+            }
+            core.setOutput('is_after_prompt', 'true');
+
+            // Extract recent context for the LLM
+            // Security: Only include comments from authorized users to prevent prompt injection
+            const allowedAssociations = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            const recentComments = allComments
+              .slice(Math.max(0, promptIndex), currentIndex + 1)
+              .filter(c => {
+                // Get author association for each comment
+                const assoc = c.author_association;
+                return allowedAssociations.includes(assoc);
+              })
+              .map(c => `[${c.user.login}]: ${c.body.substring(0, 500)}`)
+              .join('\n\n---\n\n');
+            core.setOutput('recent_context', recentComments);
+
+      - name: Analyze comment intent with Claude Haiku
+        id: analyze
+        # Security: Only run if user has write/admin access (checked in previous step)
+        if: steps.context.outputs.has_access == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IS_MANUAL: ${{ steps.context.outputs.is_manual }}
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+          PR_BRANCH: ${{ steps.context.outputs.pr_branch }}
+          COMMENT_BODY: ${{ steps.context.outputs.comment_body }}
+          HAS_PROMPT: ${{ steps.context.outputs.has_prompt }}
+          IS_AFTER_PROMPT: ${{ steps.context.outputs.is_after_prompt }}
+          RECENT_CONTEXT: ${{ steps.context.outputs.recent_context }}
+          ACCEPT_ALL: ${{ steps.context.outputs.accept_all }}
+          MANUAL_INSTRUCTIONS: ${{ steps.context.outputs.manual_instructions }}
+        run: |
+          # Handle manual workflow dispatch
+          if [ "$IS_MANUAL" = "true" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "is_accept=$ACCEPT_ALL" >> $GITHUB_OUTPUT
+            echo "user_instructions=$MANUAL_INSTRUCTIONS" >> $GITHUB_OUTPUT
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+            echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
+            echo "Manual trigger detected"
+            exit 0
+          fi
+
+          # Skip if no prompt or comment not after prompt
+          if [ "$HAS_PROMPT" != "true" ] || [ "$IS_AFTER_PROMPT" != "true" ]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "No valid trigger context"
+            exit 0
+          fi
+
+          # Build the prompt for Claude Haiku
+          cat > /tmp/analyze_prompt.txt <<'PROMPT_END'
+          You are analyzing a GitHub PR comment to determine if the user wants to trigger an AI coding assistant to implement code review suggestions.
+
+          CONTEXT:
+          A Gemini AI has previously reviewed this PR and posted numbered suggestions. A "Claude Code Integration" prompt was posted asking the user how they want to proceed. The user has now posted a new comment.
+
+          TASK:
+          Analyze the user's comment and determine:
+          1. Is this comment a REQUEST to implement the review suggestions? (not just discussion)
+          2. If yes, should ALL suggestions be implemented, or are there specific instructions?
+
+          IMPORTANT:
+          - Only return should_trigger=true if the user is CLEARLY requesting implementation
+          - General discussion, questions, or unrelated comments -> should_trigger=false
+          - Explicit requests like "accept", "yes", "implement", "go ahead", "do it", "fix these" -> should_trigger=true
+          - Specific instructions like "ignore #2" or "only fix security issues" -> include in instructions field
+
+          OUTPUT FORMAT: You MUST output ONLY raw JSON with no markdown code fences, no explanation text before or after.
+          Start your response directly with { and end with }. Do not wrap in ```json or ``` markers.
+
+          Required JSON structure:
+          {"should_trigger": true/false, "accept_all": true/false, "instructions": "specific instructions or empty string", "reasoning": "brief explanation"}
+          PROMPT_END
+
+          # Create the full user message with context
+          USER_MSG="RECENT PR COMMENTS:
+          $RECENT_CONTEXT
+
+          NEW COMMENT TO ANALYZE:
+          $COMMENT_BODY"
+
+          # Call Claude 3.5 Haiku API for comment analysis
+          RESPONSE=$(curl -s "https://api.anthropic.com/v1/messages" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$(jq -n \
+              --arg system "$(cat /tmp/analyze_prompt.txt)" \
+              --arg user "$USER_MSG" \
+              '{
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 500,
+                "temperature": 0.1,
+                "system": $system,
+                "messages": [{"role": "user", "content": $user}]
+              }')")
+
+          echo "Claude Haiku response: $RESPONSE"
+
+          # Extract the text response
+          TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+          if [ -z "$TEXT" ]; then
+            echo "Failed to get Claude response"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Raw LLM output: $TEXT"
+
+          # Parse the JSON response (handle potential markdown fences)
+          CLEAN_TEXT=$(echo "$TEXT" | sed 's/```json//g' | sed 's/```//g' | tr -d '\n')
+          SHOULD_TRIGGER=$(echo "$CLEAN_TEXT" | jq -r '.should_trigger // false')
+          ACCEPT_ALL=$(echo "$CLEAN_TEXT" | jq -r '.accept_all // false')
+          INSTRUCTIONS=$(echo "$CLEAN_TEXT" | jq -r '.instructions // ""')
+          REASONING=$(echo "$CLEAN_TEXT" | jq -r '.reasoning // ""')
+
+          echo "LLM Analysis:"
+          echo "  should_trigger: $SHOULD_TRIGGER"
+          echo "  accept_all: $ACCEPT_ALL"
+          echo "  instructions: $INSTRUCTIONS"
+          echo "  reasoning: $REASONING"
+
+          if [ "$SHOULD_TRIGGER" = "true" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "is_accept=$ACCEPT_ALL" >> $GITHUB_OUTPUT
+            echo "user_instructions=$INSTRUCTIONS" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
+
+  implement_changes:
+    name: Implement Changes with Claude Code
+    needs: detect_trigger
+    if: needs.detect_trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ needs.detect_trigger.outputs.pr_number }}
+      PR_BRANCH: ${{ needs.detect_trigger.outputs.pr_branch }}
+      IS_ACCEPT: ${{ needs.detect_trigger.outputs.is_accept }}
+      USER_INSTRUCTIONS: ${{ needs.detect_trigger.outputs.user_instructions }}
+
+    steps:
+      # Checkout PR branch first (to avoid workspace cleaning issues)
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PR_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+          path: pr-workspace
+
+      # Security: Checkout trusted scripts
+      # - For issue_comment: ALWAYS use default branch (security against malicious PR code)
+      # - For workflow_dispatch: Use PR branch (allows testing changes to the script itself)
+      - name: Checkout trusted scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && env.PR_BRANCH || github.event.repository.default_branch }}
+          path: _trusted_scripts
+          sparse-checkout: |
+            .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Security: Install Claude Agent SDK (the programmatic API)
+      # Note: @anthropic-ai/claude-code is the CLI, @anthropic-ai/claude-agent-sdk is the SDK
+      # Pin version to prevent supply chain attacks from upstream updates
+      - name: Install Claude Agent SDK
+        run: |
+          mkdir -p /tmp/claude-sdk
+          cd /tmp/claude-sdk
+          npm init -y
+          npm install @anthropic-ai/claude-agent-sdk@0.2.0 --ignore-scripts
+          echo "SDK installed at /tmp/claude-sdk/node_modules"
+          ls -la node_modules/@anthropic-ai/claude-agent-sdk/package.json
+        env:
+          NODE_ENV: production
+
+      - name: Read review instructions
+        id: instructions
+        working-directory: pr-workspace
+        run: |
+          if [ -f "REVIEW_INSTRUCTIONS.md" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            # Base64 encode to preserve formatting
+            CONTENT=$(cat REVIEW_INSTRUCTIONS.md | base64 -w0)
+            echo "content=$CONTENT" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No REVIEW_INSTRUCTIONS.md found"
+          fi
+
+      - name: Implement changes with Claude Code
+        id: implement
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REVIEW_INSTRUCTIONS: ${{ steps.instructions.outputs.content }}
+          INSTRUCTIONS_FOUND: ${{ steps.instructions.outputs.found }}
+          # Set working directory for Claude Code agent to the PR workspace
+          CLAUDE_CWD: ${{ github.workspace }}/pr-workspace
+          # SDK_PATH for PR branch script (uses explicit path)
+          SDK_PATH: /tmp/claude-sdk
+          # NODE_PATH for main branch script (uses standard require)
+          NODE_PATH: /tmp/claude-sdk/node_modules
+        run: |
+          # Execute the implementation script and capture output
+          SCRIPT_DIR="${{ github.workspace }}/_trusted_scripts/.github/scripts"
+          cd "$SCRIPT_DIR" && node claude-code-implement.cjs 2>&1 | tee /tmp/claude-output.log
+
+      - name: Extract implementation report
+        id: report
+        run: |
+          # Extract the implementation report from Claude's output
+          # Look for the "### Implementation Report" section
+          REPORT=""
+          if grep -q "### Implementation Report" /tmp/claude-output.log; then
+            # Extract from "### Implementation Report" to end or next major section
+            # Use sed to extract the range
+            EXTRACTED=$(sed -n '/### Implementation Report/,/^## [^I]/p' /tmp/claude-output.log)
+
+            # Only strip the last line if it matches a section header pattern (starts with ##)
+            # This prevents truncation when Implementation Report is the final section
+            LAST_LINE=$(echo "$EXTRACTED" | tail -n 1)
+            if echo "$LAST_LINE" | grep -q '^## '; then
+              # Last line is a section header, remove it
+              REPORT=$(echo "$EXTRACTED" | head -n -1 | head -200)
+            else
+              # Last line is actual content, keep it
+              REPORT=$(echo "$EXTRACTED" | head -200)
+            fi
+          fi
+
+          # If we found a structured report, use it
+          if [ -n "$REPORT" ]; then
+            # Base64 encode to preserve formatting
+            echo "report_found=true" >> $GITHUB_OUTPUT
+            echo "report_content<<REPORT_EOF" >> $GITHUB_OUTPUT
+            echo "$REPORT" >> $GITHUB_OUTPUT
+            echo "REPORT_EOF" >> $GITHUB_OUTPUT
+          else
+            echo "report_found=false" >> $GITHUB_OUTPUT
+            # Fallback: extract lines matching the new format with "Status: FIXED/SKIPPED/etc"
+            # Updated pattern to match the actual format: "- **Status**: FIXED"
+            FALLBACK=$(grep -E "^\*\*Issue #|- \*\*Status\*\*: (FIXED|SKIPPED|MODIFIED|NOT_APPLICABLE)" /tmp/claude-output.log | head -50 || echo "")
+            if [ -n "$FALLBACK" ]; then
+              echo "fallback_content<<FALLBACK_EOF" >> $GITHUB_OUTPUT
+              echo "$FALLBACK" >> $GITHUB_OUTPUT
+              echo "FALLBACK_EOF" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Configure git
+        working-directory: pr-workspace
+        run: |
+          git config user.name "Claude Code Bot"
+          git config user.email "claude-code-bot@users.noreply.github.com"
+
+      - name: Delete REVIEW_INSTRUCTIONS.md if present
+        working-directory: pr-workspace
+        run: |
+          if [ -f "REVIEW_INSTRUCTIONS.md" ]; then
+            git rm REVIEW_INSTRUCTIONS.md
+            echo "Removed REVIEW_INSTRUCTIONS.md"
+          fi
+
+      - name: Commit and push changes
+        id: commit
+        working-directory: pr-workspace
+        run: |
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            # Read the implementation summary if available
+            SUMMARY=""
+            if [ -f "/tmp/claude-implementation-summary.txt" ]; then
+              SUMMARY=$(cat /tmp/claude-implementation-summary.txt | head -c 500)
+            fi
+
+            git commit -m "Implement review suggestions via Claude Code" \
+              -m "Agent-Note: $SUMMARY"
+
+            # Push with retry logic
+            for i in 1 2 3 4; do
+              if git push origin HEAD:${{ env.PR_BRANCH }}; then
+                echo "Push successful"
+                echo "has_changes=true" >> $GITHUB_OUTPUT
+                break
+              else
+                if [ $i -lt 4 ]; then
+                  DELAY=$((2 ** i))
+                  echo "Push failed, retrying in ${DELAY}s..."
+                  sleep $DELAY
+                else
+                  echo "Push failed after 4 attempts"
+                  exit 1
+                fi
+              fi
+            done
+          fi
+
+      - name: Post completion comment
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          HAS_CHANGES: ${{ steps.commit.outputs.has_changes }}
+          JOB_STATUS: ${{ job.status }}
+          REPORT_FOUND: ${{ steps.report.outputs.report_found }}
+          REPORT_CONTENT: ${{ steps.report.outputs.report_content }}
+          FALLBACK_CONTENT: ${{ steps.report.outputs.fallback_content }}
+        with:
+          script: |
+            const prNumber = parseInt(process.env.PR_NUMBER);
+            const hasChanges = process.env.HAS_CHANGES === 'true';
+            const jobStatus = process.env.JOB_STATUS;
+            const reportFound = process.env.REPORT_FOUND === 'true';
+            const reportContent = process.env.REPORT_CONTENT || '';
+            const fallbackContent = process.env.FALLBACK_CONTENT || '';
+
+            let body = '';
+
+            if (jobStatus === 'success') {
+              if (hasChanges) {
+                body = [
+                  '## ✅ Claude Code Implementation Complete',
+                  '',
+                  'Changes have been pushed to this branch.',
+                  '',
+                ].join('\n');
+
+                // Add the detailed implementation report
+                if (reportFound && reportContent) {
+                  body += [
+                    '',
+                    '---',
+                    '',
+                    reportContent,
+                    '',
+                  ].join('\n');
+                } else if (fallbackContent) {
+                  body += [
+                    '',
+                    '---',
+                    '',
+                    '### Implementation Summary',
+                    '',
+                    fallbackContent,
+                    '',
+                  ].join('\n');
+                } else {
+                  body += [
+                    '',
+                    '**What happened:**',
+                    '- Read the review instructions from `REVIEW_INSTRUCTIONS.md`',
+                    '- Implemented the requested changes',
+                    '- Removed the instructions file',
+                    '- Committed and pushed to this branch',
+                    '',
+                  ].join('\n');
+                }
+
+                body += [
+                  '---',
+                  '',
+                  '**Legend:**',
+                  '- **FIXED**: Issue was addressed as suggested',
+                  '- **MODIFIED**: Issue was addressed with a different approach',
+                  '- **SKIPPED**: Issue was intentionally not addressed (see assessment)',
+                  '- **NOT_APPLICABLE**: Issue does not apply to current code state',
+                  '',
+                  '> Review the **Assessment** for each item to determine if the review suggestion was a legitimate issue or a false positive.',
+                  '',
+                  '---',
+                  '',
+                  '**Next Steps:**',
+                  '1. Review the implementation report above',
+                  '2. Check if any SKIPPEDs were correct decisions',
+                  '3. Gemini will automatically review the new changes',
+                  '4. If more changes are needed, the cycle continues',
+                  '5. When satisfied, merge to main',
+                  '',
+                  '*The review cycle continues until you merge.*'
+                ].join('\n');
+              } else {
+                body = [
+                  '## ℹ️ Claude Code - No Changes Made',
+                  '',
+                  'The implementation completed but no file changes were needed.',
+                  '',
+                ].join('\n');
+
+                // Still include the report if available
+                if (reportFound && reportContent) {
+                  body += [
+                    '---',
+                    '',
+                    reportContent,
+                    '',
+                    '---',
+                    '',
+                  ].join('\n');
+                }
+
+                body += [
+                  'This might happen if:',
+                  '- The suggestions were already implemented',
+                  '- All review items were determined to be false positives',
+                  '- The instructions didn\'t require code changes',
+                  '',
+                  'Please review the assessment above and provide additional instructions if needed.'
+                ].join('\n');
+              }
+            } else {
+              const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+              body = [
+                '## ❌ Claude Code Implementation Failed',
+                '',
+                `The implementation encountered an error. Please check the [workflow run](${runUrl}) for details.`,
+                '',
+                '**Troubleshooting:**',
+                '- Ensure `ANTHROPIC_API_KEY` secret is configured',
+                '- Check if the review instructions are clear',
+                '- Try providing more specific instructions',
+                '',
+                'You can retry by commenting `accept` or providing new instructions.'
+              ].join('\n');
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });

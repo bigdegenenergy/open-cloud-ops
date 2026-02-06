@@ -1,0 +1,113 @@
+# =============================================================================
+# Cerebra (LLM Gateway) - Kubernetes Deployment, Service, and ConfigMap
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cerebra-config
+  namespace: open-cloud-ops
+  labels:
+    app: cerebra
+    app.kubernetes.io/part-of: open-cloud-ops
+data:
+  CEREBRA_PORT: "8080"
+  CEREBRA_LOG_LEVEL: "info"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "opencloudops"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cerebra
+  namespace: open-cloud-ops
+  labels:
+    app: cerebra
+    app.kubernetes.io/name: cerebra
+    app.kubernetes.io/component: llm-gateway
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cerebra
+  template:
+    metadata:
+      labels:
+        app: cerebra
+        app.kubernetes.io/name: cerebra
+        app.kubernetes.io/component: llm-gateway
+        app.kubernetes.io/part-of: open-cloud-ops
+    spec:
+      containers:
+        - name: cerebra
+          image: open-cloud-ops/cerebra:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: cerebra-config
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oco-db-credentials
+                  key: password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oco-redis-credentials
+                  key: password
+                  optional: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "125m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cerebra
+  namespace: open-cloud-ops
+  labels:
+    app: cerebra
+    app.kubernetes.io/name: cerebra
+    app.kubernetes.io/component: llm-gateway
+    app.kubernetes.io/part-of: open-cloud-ops
+spec:
+  type: ClusterIP
+  selector:
+    app: cerebra
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http

@@ -1,0 +1,45 @@
+# =============================================================================
+# Open Cloud Ops - Prometheus Configuration
+# =============================================================================
+# Scrapes metrics from all three application services.
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # ---------------------------------------------------------------------------
+  # Prometheus self-monitoring
+  # ---------------------------------------------------------------------------
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ---------------------------------------------------------------------------
+  # Cerebra (LLM Gateway) metrics
+  # ---------------------------------------------------------------------------
+  - job_name: "cerebra"
+    static_configs:
+      - targets: ["cerebra:8080"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # ---------------------------------------------------------------------------
+  # Economist (FinOps Core) metrics
+  # ---------------------------------------------------------------------------
+  - job_name: "economist"
+    static_configs:
+      - targets: ["economist:8081"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # ---------------------------------------------------------------------------
+  # Aegis (Resilience Engine) metrics
+  # ---------------------------------------------------------------------------
+  - job_name: "aegis"
+    static_configs:
+      - targets: ["aegis:8082"]
+    metrics_path: /metrics
+    scrape_interval: 15s
