@@ -56,7 +56,13 @@ class OptimizationEngine:
         # Aggregate costs per resource over last 30 days
         cutoff = date.today() - timedelta(days=30)
         resource_totals: dict[str, dict[str, Any]] = defaultdict(
-            lambda: {"cost": 0.0, "usage": 0.0, "days": 0, "provider": "", "service": ""}
+            lambda: {
+                "cost": 0.0,
+                "usage": 0.0,
+                "days": 0,
+                "provider": "",
+                "service": "",
+            }
         )
 
         for cost in costs:
@@ -101,9 +107,7 @@ class OptimizationEngine:
                 )
                 recommendations.append(rec)
 
-        logger.info(
-            "Idle resource analysis: %d recommendations", len(recommendations)
-        )
+        logger.info("Idle resource analysis: %d recommendations", len(recommendations))
         return recommendations
 
     # ------------------------------------------------------------------
@@ -142,11 +146,16 @@ class OptimizationEngine:
                 rid = resource.get("resource_id", "unknown")
                 instance_type = resource.get("instance_type", "unknown")
 
-                # Estimate savings as a percentage of typical instance cost
+                # Estimate savings from actual monthly cost when available,
+                # falling back to a conservative percentage of a typical instance.
                 utilization = max(cpu_avg or 0, mem_avg or 0)
                 savings_factor = 1.0 - (utilization / 0.5)  # rough heuristic
                 savings_factor = max(min(savings_factor, 0.6), 0.1)
-                estimated_savings = savings_factor * 100  # placeholder $/month
+                monthly_cost = resource.get("monthly_cost_usd", 0.0)
+                if monthly_cost > 0:
+                    estimated_savings = savings_factor * monthly_cost
+                else:
+                    estimated_savings = savings_factor * 100  # fallback
 
                 metrics_note = []
                 if over_cpu:
@@ -172,9 +181,7 @@ class OptimizationEngine:
                 )
                 recommendations.append(rec)
 
-        logger.info(
-            "Rightsizing analysis: %d recommendations", len(recommendations)
-        )
+        logger.info("Rightsizing analysis: %d recommendations", len(recommendations))
         return recommendations
 
     # ------------------------------------------------------------------
@@ -292,8 +299,12 @@ class OptimizationEngine:
             rid = resource.get("resource_id", "unknown")
             provider = resource.get("provider", "unknown")
 
-            # Estimate ~60% savings from spot
-            estimated_savings = 50.0  # placeholder per-instance $/month
+            # Estimate ~60% savings from spot, using actual cost when available
+            monthly_cost = resource.get("monthly_cost_usd", 0.0)
+            if monthly_cost > 0:
+                estimated_savings = monthly_cost * 0.60
+            else:
+                estimated_savings = 50.0  # fallback when cost data unavailable
 
             rec = OptimizationRecommendation(
                 id=uuid.uuid4(),

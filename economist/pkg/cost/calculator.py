@@ -8,7 +8,9 @@ and simple linear forecasting. All monetary calculations use
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -17,11 +19,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Static exchange rates (relative to 1 USD).  In a production system these
-# would be fetched from a live forex API, but we keep a static table here
-# so the module works without external dependencies.
+# Exchange rates (relative to 1 USD).
+#
+# Default static table used when no external rates are provided.  Override at
+# runtime via the ``EXCHANGE_RATES_JSON`` environment variable, which should
+# contain a JSON object mapping currency codes to their USD multipliers,
+# e.g. ``{"EUR": "1.09", "GBP": "1.27"}``.
 # ---------------------------------------------------------------------------
-_EXCHANGE_RATES_TO_USD: dict[str, Decimal] = {
+_DEFAULT_RATES: dict[str, Decimal] = {
     "USD": Decimal("1.0"),
     "EUR": Decimal("1.09"),
     "GBP": Decimal("1.27"),
@@ -39,6 +44,29 @@ _EXCHANGE_RATES_TO_USD: dict[str, Decimal] = {
     "NOK": Decimal("0.094"),
     "MXN": Decimal("0.058"),
 }
+
+
+def _load_exchange_rates() -> dict[str, Decimal]:
+    """Load exchange rates, preferring env-var overrides over defaults."""
+    rates = dict(_DEFAULT_RATES)
+    env_json = os.environ.get("EXCHANGE_RATES_JSON", "").strip()
+    if env_json:
+        try:
+            overrides = json.loads(env_json)
+            for code, value in overrides.items():
+                rates[code.upper()] = Decimal(str(value))
+            logger.info(
+                "Loaded %d exchange rate overrides from EXCHANGE_RATES_JSON",
+                len(overrides),
+            )
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning(
+                "Failed to parse EXCHANGE_RATES_JSON; using defaults: %s", exc
+            )
+    return rates
+
+
+_EXCHANGE_RATES_TO_USD: dict[str, Decimal] = _load_exchange_rates()
 
 _SIX_PLACES = Decimal("0.000001")
 _TWO_PLACES = Decimal("0.01")

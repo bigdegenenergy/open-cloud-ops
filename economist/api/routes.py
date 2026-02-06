@@ -28,7 +28,6 @@ from internal.ingestion.collector import CostCollector
 from internal.optimizer.engine import OptimizationEngine
 from internal.policy.engine import PolicyEngine
 from pkg.cost.calculator import (
-    aggregate_costs,
     calculate_trend,
     forecast_cost,
 )
@@ -233,31 +232,57 @@ async def get_cost_summary(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     db: Session = Depends(get_session),
 ) -> CostSummaryResponse:
-    """Return an aggregated cost summary with optional filters."""
-    query = db.query(CloudCost)
+    """Return an aggregated cost summary with optional filters.
 
-    if provider:
-        query = query.filter(CloudCost.provider == provider)
-    if service:
-        query = query.filter(CloudCost.service == service)
-
+    Uses SQL-level aggregation to avoid loading all rows into memory.
+    """
     start = _parse_date_param(start_date, default_days_back=30)
     end = _parse_date_param(end_date, default_days_back=0)
-    query = query.filter(CloudCost.date >= start, CloudCost.date <= end)
 
-    rows = query.all()
-    cost_dicts = [r.to_dict() for r in rows]
+    base_filter = [CloudCost.date >= start, CloudCost.date <= end]
+    if provider:
+        base_filter.append(CloudCost.provider == provider)
+    if service:
+        base_filter.append(CloudCost.service == service)
 
-    total = sum(c.get("cost_usd", 0) for c in cost_dicts)
-    by_provider = aggregate_costs(cost_dicts, "provider")
-    by_service = aggregate_costs(cost_dicts, "service")
+    # Total cost + record count via SQL aggregation
+    totals = (
+        db.query(
+            func.coalesce(func.sum(CloudCost.cost_usd), 0),
+            func.count(CloudCost.id),
+        )
+        .filter(*base_filter)
+        .one()
+    )
+    total_cost = float(totals[0])
+    record_count = totals[1]
+
+    # Provider breakdown via SQL GROUP BY
+    by_provider_rows = (
+        db.query(CloudCost.provider, func.sum(CloudCost.cost_usd))
+        .filter(*base_filter)
+        .group_by(CloudCost.provider)
+        .order_by(func.sum(CloudCost.cost_usd).desc())
+        .all()
+    )
+    by_provider = {row[0]: float(row[1]) for row in by_provider_rows}
+
+    # Service breakdown via SQL GROUP BY
+    by_service_rows = (
+        db.query(CloudCost.service, func.sum(CloudCost.cost_usd))
+        .filter(*base_filter)
+        .group_by(CloudCost.service)
+        .order_by(func.sum(CloudCost.cost_usd).desc())
+        .all()
+    )
+    by_service = {row[0]: float(row[1]) for row in by_service_rows}
 
     return CostSummaryResponse(
-        total_cost_usd=round(total, 2),
+        total_cost_usd=round(total_cost, 2),
         provider_breakdown=by_provider,
         service_breakdown=by_service,
         date_range={"start": start.isoformat(), "end": end.isoformat()},
-        record_count=len(cost_dicts),
+        record_count=record_count,
     )
 
 
@@ -270,27 +295,42 @@ async def get_cost_breakdown(
     provider: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000, description="Max rows to return"),
     db: Session = Depends(get_session),
 ) -> CostBreakdownResponse:
-    """Return a detailed cost breakdown by a single dimension."""
-    valid_dimensions = {"provider", "service", "region", "account_id"}
-    if dimension not in valid_dimensions:
+    """Return a detailed cost breakdown by a single dimension.
+
+    Uses SQL GROUP BY for aggregation to avoid loading all rows into memory.
+    """
+    _valid_dimension_cols = {
+        "provider": CloudCost.provider,
+        "service": CloudCost.service,
+        "region": CloudCost.region,
+        "account_id": CloudCost.account_id,
+    }
+    if dimension not in _valid_dimension_cols:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid dimension '{dimension}'. Must be one of: {sorted(valid_dimensions)}",
+            detail=f"Invalid dimension '{dimension}'. Must be one of: {sorted(_valid_dimension_cols)}",
         )
 
-    query = db.query(CloudCost)
-    if provider:
-        query = query.filter(CloudCost.provider == provider)
-
+    dim_col = _valid_dimension_cols[dimension]
     start = _parse_date_param(start_date, default_days_back=30)
     end = _parse_date_param(end_date, default_days_back=0)
-    query = query.filter(CloudCost.date >= start, CloudCost.date <= end)
 
-    rows = query.all()
-    cost_dicts = [r.to_dict() for r in rows]
-    breakdown = aggregate_costs(cost_dicts, dimension)
+    base_filter = [CloudCost.date >= start, CloudCost.date <= end]
+    if provider:
+        base_filter.append(CloudCost.provider == provider)
+
+    rows = (
+        db.query(dim_col, func.sum(CloudCost.cost_usd))
+        .filter(*base_filter)
+        .group_by(dim_col)
+        .order_by(func.sum(CloudCost.cost_usd).desc())
+        .limit(limit)
+        .all()
+    )
+    breakdown = {str(row[0] or "unknown"): float(row[1]) for row in rows}
     total = sum(breakdown.values())
 
     return CostBreakdownResponse(
@@ -389,9 +429,11 @@ async def list_recommendations(
     recommendation_type: Optional[str] = Query(None),
     provider: Optional[str] = Query(None),
     min_savings: Optional[float] = Query(None, ge=0),
+    limit: int = Query(100, ge=1, le=1000, description="Max results to return"),
+    offset: int = Query(0, ge=0, description="Number of results to skip"),
     db: Session = Depends(get_session),
 ) -> list[RecommendationResponse]:
-    """List optimization recommendations with optional filters."""
+    """List optimization recommendations with optional filters and pagination."""
     query = db.query(OptimizationRecommendation)
 
     if status:
@@ -407,9 +449,12 @@ async def list_recommendations(
             OptimizationRecommendation.estimated_monthly_savings >= min_savings
         )
 
-    rows = query.order_by(
-        OptimizationRecommendation.estimated_monthly_savings.desc()
-    ).all()
+    rows = (
+        query.order_by(OptimizationRecommendation.estimated_monthly_savings.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
     return [RecommendationResponse(**r.to_dict()) for r in rows]
 
@@ -503,9 +548,11 @@ async def list_violations(
     severity: Optional[str] = Query(None),
     provider: Optional[str] = Query(None),
     resolved: Optional[bool] = Query(None),
+    limit: int = Query(100, ge=1, le=1000, description="Max results to return"),
+    offset: int = Query(0, ge=0, description="Number of results to skip"),
     db: Session = Depends(get_session),
 ) -> list[ViolationResponse]:
-    """List policy violations with optional filters."""
+    """List policy violations with optional filters and pagination."""
     query = db.query(PolicyViolation)
 
     if severity:
@@ -517,7 +564,12 @@ async def list_violations(
     elif resolved is False:
         query = query.filter(PolicyViolation.resolved_at.is_(None))
 
-    rows = query.order_by(PolicyViolation.detected_at.desc()).all()
+    rows = (
+        query.order_by(PolicyViolation.detected_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     return [ViolationResponse(**v.to_dict()) for v in rows]
 
 
@@ -528,32 +580,65 @@ async def list_violations(
 async def get_dashboard_overview(
     db: Session = Depends(get_session),
 ) -> DashboardOverview:
-    """Combined dashboard data endpoint."""
-    # Total cost (last 30 days)
+    """Combined dashboard data endpoint.
+
+    Uses SQL-level aggregation to avoid loading all cost rows into memory.
+    """
     thirty_days_ago = date.today() - timedelta(days=30)
-    cost_rows = db.query(CloudCost).filter(CloudCost.date >= thirty_days_ago).all()
-    cost_dicts = [r.to_dict() for r in cost_rows]
-    total_cost = sum(c.get("cost_usd", 0) for c in cost_dicts)
-
-    # Trend
     sixty_days_ago = date.today() - timedelta(days=60)
-    trend_rows = db.query(CloudCost).filter(CloudCost.date >= sixty_days_ago).all()
-    trend_dicts = [r.to_dict() for r in trend_rows]
-    trend_data = calculate_trend(trend_dicts, 30)
 
-    # Top services and providers
-    top_services = aggregate_costs(cost_dicts, "service")
-    top_services = dict(list(top_services.items())[:10])
-    top_providers = aggregate_costs(cost_dicts, "provider")
+    # Total cost (last 30 days) via SQL
+    total_cost_row = (
+        db.query(func.coalesce(func.sum(CloudCost.cost_usd), 0))
+        .filter(CloudCost.date >= thirty_days_ago)
+        .scalar()
+    )
+    total_cost = float(total_cost_row)
 
-    # Recommendations
-    open_recs = (
-        db.query(OptimizationRecommendation)
-        .filter(OptimizationRecommendation.status == "open")
+    # Trend: we still need per-record date info for the two-period comparison,
+    # but only pull the minimal columns needed (cost + date).
+    trend_rows = (
+        db.query(CloudCost.cost_usd, CloudCost.date)
+        .filter(CloudCost.date >= sixty_days_ago)
         .all()
     )
-    rec_count = len(open_recs)
-    total_savings = sum(r.estimated_monthly_savings for r in open_recs)
+    trend_dicts = [{"cost_usd": float(r[0]), "date": r[1]} for r in trend_rows]
+    trend_data = calculate_trend(trend_dicts, 30)
+
+    # Top services (SQL GROUP BY, top 10)
+    top_svc_rows = (
+        db.query(CloudCost.service, func.sum(CloudCost.cost_usd))
+        .filter(CloudCost.date >= thirty_days_ago)
+        .group_by(CloudCost.service)
+        .order_by(func.sum(CloudCost.cost_usd).desc())
+        .limit(10)
+        .all()
+    )
+    top_services = {row[0]: float(row[1]) for row in top_svc_rows}
+
+    # Top providers (SQL GROUP BY)
+    top_prov_rows = (
+        db.query(CloudCost.provider, func.sum(CloudCost.cost_usd))
+        .filter(CloudCost.date >= thirty_days_ago)
+        .group_by(CloudCost.provider)
+        .order_by(func.sum(CloudCost.cost_usd).desc())
+        .all()
+    )
+    top_providers = {row[0]: float(row[1]) for row in top_prov_rows}
+
+    # Recommendations: aggregate via SQL instead of loading all rows
+    rec_agg = (
+        db.query(
+            func.count(OptimizationRecommendation.id),
+            func.coalesce(
+                func.sum(OptimizationRecommendation.estimated_monthly_savings), 0
+            ),
+        )
+        .filter(OptimizationRecommendation.status == "open")
+        .one()
+    )
+    rec_count = rec_agg[0]
+    total_savings = float(rec_agg[1])
 
     # Policies & violations
     active_policies = (

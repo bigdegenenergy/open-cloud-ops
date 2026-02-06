@@ -641,14 +641,19 @@ func (m *BackupManager) encryptFile(plainPath string) (string, error) {
 	}
 	os.Chmod(encFile.Name(), 0600)
 
-	block, err := aes.NewCipher(m.encryptionKey)
+	// Derive separate encryption and MAC keys from the master key using
+	// HMAC-SHA256 with distinct info labels.  This prevents related-key
+	// attacks when using the same master secret for both AES-CTR and HMAC.
+	encKey, macKey := deriveKeys(m.encryptionKey)
+
+	block, err := aes.NewCipher(encKey)
 	if err != nil {
 		encFile.Close()
 		os.Remove(encFile.Name())
 		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Generate random IV
+	// Generate random IV (one per file, never reused)
 	iv := make([]byte, aes.BlockSize)
 	if _, err := rand.Read(iv); err != nil {
 		encFile.Close()
@@ -664,7 +669,7 @@ func (m *BackupManager) encryptFile(plainPath string) (string, error) {
 	}
 
 	// Stream encrypt with AES-CTR and compute HMAC over IV+ciphertext
-	mac := hmac.New(sha256.New, m.encryptionKey)
+	mac := hmac.New(sha256.New, macKey)
 	mac.Write(iv)
 
 	stream := cipher.NewCTR(block, iv)
@@ -700,6 +705,22 @@ func (m *BackupManager) encryptFile(plainPath string) (string, error) {
 
 	encFile.Close()
 	return encFile.Name(), nil
+}
+
+// deriveKeys derives separate encryption and MAC keys from a master key using
+// HMAC-SHA256 with distinct info labels (a simplified HKDF-Expand).
+// This ensures the AES-CTR key and HMAC-SHA256 key are cryptographically
+// independent, preventing related-key attacks.
+func deriveKeys(masterKey []byte) (encKey, macKey []byte) {
+	encDeriver := hmac.New(sha256.New, masterKey)
+	encDeriver.Write([]byte("aegis-backup-enc-v1"))
+	encKey = encDeriver.Sum(nil)
+
+	macDeriver := hmac.New(sha256.New, masterKey)
+	macDeriver.Write([]byte("aegis-backup-mac-v1"))
+	macKey = macDeriver.Sum(nil)
+
+	return encKey, macKey
 }
 
 // calculateNextRun computes the next run time from a cron-like schedule string.
