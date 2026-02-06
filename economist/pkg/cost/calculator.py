@@ -2,7 +2,8 @@
 Cost calculation utilities for the Economist module.
 
 Provides currency normalization, cost aggregation, trend analysis,
-and simple linear forecasting.
+and simple linear forecasting. All monetary calculations use
+``decimal.Decimal`` to avoid floating-point precision errors.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -19,28 +21,31 @@ logger = logging.getLogger(__name__)
 # would be fetched from a live forex API, but we keep a static table here
 # so the module works without external dependencies.
 # ---------------------------------------------------------------------------
-_EXCHANGE_RATES_TO_USD: dict[str, float] = {
-    "USD": 1.0,
-    "EUR": 1.09,
-    "GBP": 1.27,
-    "JPY": 0.0067,
-    "CAD": 0.74,
-    "AUD": 0.65,
-    "CHF": 1.13,
-    "CNY": 0.14,
-    "INR": 0.012,
-    "BRL": 0.20,
-    "KRW": 0.00075,
-    "SGD": 0.75,
-    "HKD": 0.13,
-    "SEK": 0.096,
-    "NOK": 0.094,
-    "MXN": 0.058,
+_EXCHANGE_RATES_TO_USD: dict[str, Decimal] = {
+    "USD": Decimal("1.0"),
+    "EUR": Decimal("1.09"),
+    "GBP": Decimal("1.27"),
+    "JPY": Decimal("0.0067"),
+    "CAD": Decimal("0.74"),
+    "AUD": Decimal("0.65"),
+    "CHF": Decimal("1.13"),
+    "CNY": Decimal("0.14"),
+    "INR": Decimal("0.012"),
+    "BRL": Decimal("0.20"),
+    "KRW": Decimal("0.00075"),
+    "SGD": Decimal("0.75"),
+    "HKD": Decimal("0.13"),
+    "SEK": Decimal("0.096"),
+    "NOK": Decimal("0.094"),
+    "MXN": Decimal("0.058"),
 }
+
+_SIX_PLACES = Decimal("0.000001")
+_TWO_PLACES = Decimal("0.01")
 
 
 def normalize_cost(
-    amount: float,
+    amount: float | Decimal,
     currency: str,
     target_currency: str = "USD",
 ) -> float:
@@ -65,17 +70,18 @@ def normalize_cost(
     """
     currency = currency.upper()
     target_currency = target_currency.upper()
+    amt = Decimal(str(amount))
 
     if currency == target_currency:
-        return round(amount, 6)
+        return float(amt.quantize(_SIX_PLACES, rounding=ROUND_HALF_UP))
 
     # Convert source -> USD
     src_rate = _EXCHANGE_RATES_TO_USD.get(currency)
     if src_rate is None:
         logger.warning("Unknown currency %s; treating as 1:1 with USD", currency)
-        src_rate = 1.0
+        src_rate = Decimal("1.0")
 
-    amount_usd = amount * src_rate
+    amount_usd = amt * src_rate
 
     # Convert USD -> target
     tgt_rate = _EXCHANGE_RATES_TO_USD.get(target_currency)
@@ -84,9 +90,10 @@ def normalize_cost(
             "Unknown target currency %s; treating as 1:1 with USD",
             target_currency,
         )
-        tgt_rate = 1.0
+        tgt_rate = Decimal("1.0")
 
-    return round(amount_usd / tgt_rate, 6)
+    result = amount_usd / tgt_rate
+    return float(result.quantize(_SIX_PLACES, rounding=ROUND_HALF_UP))
 
 
 def aggregate_costs(
@@ -111,15 +118,21 @@ def aggregate_costs(
         Mapping of dimension value -> total cost in USD, sorted
         descending by cost.
     """
-    totals: dict[str, float] = defaultdict(float)
+    totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for cost in costs:
         key = cost.get(group_by, "unknown")
         if key is None:
             key = "unknown"
-        totals[str(key)] += cost.get("cost_usd", 0.0)
+        totals[str(key)] += Decimal(str(cost.get("cost_usd", 0.0)))
 
-    # Sort descending by cost
-    return dict(sorted(totals.items(), key=lambda kv: kv[1], reverse=True))
+    # Sort descending by cost, convert back to float for API compatibility
+    return dict(
+        sorted(
+            ((k, float(v)) for k, v in totals.items()),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )
+    )
 
 
 def calculate_trend(
@@ -150,14 +163,14 @@ def calculate_trend(
     current_start = today - timedelta(days=period_days)
     previous_start = current_start - timedelta(days=period_days)
 
-    current_total = 0.0
-    previous_total = 0.0
+    current_total = Decimal("0")
+    previous_total = Decimal("0")
 
     for cost in costs:
         cost_date = _parse_date(cost.get("date"))
         if cost_date is None:
             continue
-        amount = cost.get("cost_usd", 0.0)
+        amount = Decimal(str(cost.get("cost_usd", 0.0)))
 
         if current_start <= cost_date <= today:
             current_total += amount
@@ -165,23 +178,31 @@ def calculate_trend(
             previous_total += amount
 
     if previous_total > 0:
-        change_pct = ((current_total - previous_total) / previous_total) * 100.0
+        change_pct = ((current_total - previous_total) / previous_total) * Decimal(
+            "100"
+        )
     elif current_total > 0:
-        change_pct = 100.0
+        change_pct = Decimal("100")
     else:
-        change_pct = 0.0
+        change_pct = Decimal("0")
 
-    if change_pct > 2.0:
+    if change_pct > Decimal("2"):
         trend = "increasing"
-    elif change_pct < -2.0:
+    elif change_pct < Decimal("-2"):
         trend = "decreasing"
     else:
         trend = "stable"
 
     return {
-        "current_period_cost": round(current_total, 2),
-        "previous_period_cost": round(previous_total, 2),
-        "change_percent": round(change_pct, 2),
+        "current_period_cost": float(
+            current_total.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+        ),
+        "previous_period_cost": float(
+            previous_total.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+        ),
+        "change_percent": float(
+            change_pct.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+        ),
         "trend": trend,
         "period_days": period_days,
     }
@@ -209,13 +230,15 @@ def forecast_cost(
         Keys: ``daily_forecasts`` (list of ``{date, cost}``),
         ``total_forecast``, ``average_daily``, ``forecast_days``.
     """
-    # Aggregate costs by day
-    daily: dict[date, float] = defaultdict(float)
+    # Aggregate costs by day using Decimal for precision
+    daily_dec: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
     for cost in historical_costs:
         d = _parse_date(cost.get("date"))
         if d is None:
             continue
-        daily[d] += cost.get("cost_usd", 0.0)
+        daily_dec[d] += Decimal(str(cost.get("cost_usd", 0.0)))
+    # Convert to float for linear regression (acceptable for forecasting)
+    daily: dict[date, float] = {k: float(v) for k, v in daily_dec.items()}
 
     if not daily:
         return {
@@ -283,9 +306,7 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
-def _linear_regression(
-    xs: list[float], ys: list[float], n: int
-) -> tuple[float, float]:
+def _linear_regression(xs: list[float], ys: list[float], n: int) -> tuple[float, float]:
     """Return (slope, intercept) via simple ordinary least squares."""
     if n == 0:
         return 0.0, 0.0

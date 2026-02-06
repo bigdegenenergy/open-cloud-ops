@@ -167,8 +167,9 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// 6. Read response and extract token usage
-	respBody, err := io.ReadAll(resp.Body)
+	// 6. Read response and extract token usage (bounded to 50MB to prevent OOM from upstream)
+	const maxResponseSize = 50 * 1024 * 1024 // 50MB
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
 		return

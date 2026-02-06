@@ -6,6 +6,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/bigdegenenergy/open-cloud-ops/aegis/internal/recovery"
 	"github.com/bigdegenenergy/open-cloud-ops/aegis/pkg/models"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Handler holds references to all managers and provides HTTP handler methods.
@@ -23,6 +26,7 @@ type Handler struct {
 	recoveryManager *recovery.RecoveryManager
 	policyEngine    *policy.PolicyEngine
 	healthChecker   *health.HealthChecker
+	pool            *pgxpool.Pool
 	startTime       time.Time
 }
 
@@ -32,18 +36,39 @@ func NewHandler(
 	recoveryManager *recovery.RecoveryManager,
 	policyEngine *policy.PolicyEngine,
 	healthChecker *health.HealthChecker,
+	opts ...HandlerOption,
 ) *Handler {
-	return &Handler{
+	h := &Handler{
 		backupManager:   backupManager,
 		recoveryManager: recoveryManager,
 		policyEngine:    policyEngine,
 		healthChecker:   healthChecker,
 		startTime:       time.Now().UTC(),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
-// APIKeyAuth is a simple Gin middleware that requires a non-empty X-API-Key header.
-func APIKeyAuth() gin.HandlerFunc {
+// HandlerOption configures optional Handler dependencies.
+type HandlerOption func(*Handler)
+
+// WithPool sets the database pool for DB-backed API key validation.
+func WithPool(pool *pgxpool.Pool) HandlerOption {
+	return func(h *Handler) { h.pool = pool }
+}
+
+// hashAPIKey returns the hex-encoded SHA-256 hash of the given API key.
+func hashAPIKey(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
+}
+
+// APIKeyAuth returns a Gin middleware that validates the X-API-Key header.
+// When a database pool is provided, it verifies the key against the api_keys table
+// using key_prefix lookup and SHA-256 hash comparison.
+func APIKeyAuth(pool *pgxpool.Pool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-API-Key")
 		if apiKey == "" {
@@ -62,6 +87,30 @@ func APIKeyAuth() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+
+		// If DB pool is available, validate against api_keys table
+		if pool != nil {
+			keyHash := hashAPIKey(apiKey)
+			var entityID, storedHash string
+			err := pool.QueryRow(
+				c.Request.Context(),
+				`SELECT entity_id, key_hash FROM api_keys
+				 WHERE key_prefix = $1 AND revoked = false
+				 LIMIT 1`,
+				apiKey[:8],
+			).Scan(&entityID, &storedHash)
+
+			if err != nil || storedHash != keyHash {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"error":   "unauthorized",
+					"message": "Invalid API key.",
+				})
+				c.Abort()
+				return
+			}
+			c.Set("entity_id", entityID)
+		}
+
 		c.Set("api_key", apiKey)
 		c.Next()
 	}
@@ -72,9 +121,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	// Service health endpoint (unauthenticated)
 	r.GET("/health", h.ServiceHealth)
 
-	// API v1 routes (require API key)
+	// API v1 routes (require API key with DB-backed validation)
 	v1 := r.Group("/api/v1")
-	v1.Use(APIKeyAuth())
+	v1.Use(APIKeyAuth(h.pool))
 	{
 		// Backup job management
 		backups := v1.Group("/backups")

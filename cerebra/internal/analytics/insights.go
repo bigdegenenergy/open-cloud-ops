@@ -263,6 +263,15 @@ func (e *InsightsEngine) RecommendModelSwitches() ([]Insight, error) {
 	return insights, nil
 }
 
+// columnForDimension returns the safe SQL column name for a given dimension.
+// It uses a strict mapping rather than string interpolation to prevent SQL injection.
+var dimensionColumns = map[string]string{
+	"agent":    "agent_id",
+	"team":     "team_id",
+	"model":    "model",
+	"provider": "provider",
+}
+
 // GenerateReport creates a summary report for a given time period.
 // It aggregates cost data into CostSummary objects by multiple dimensions
 // (agent, team, model, provider).
@@ -272,64 +281,43 @@ func (e *InsightsEngine) GenerateReport(from, to time.Time) ([]models.CostSummar
 
 	var summaries []models.CostSummary
 
-	// Generate summaries for each dimension
-	dimensions := []struct {
-		name    string
-		idCol   string
-		nameCol string
-	}{
-		{"agent", "agent_id", "agent_id"},
-		{"team", "team_id", "team_id"},
-		{"model", "model", "model"},
-		{"provider", "provider", "provider"},
-	}
-
-	// Allowlist of valid column names to prevent SQL injection
-	validColumns := map[string]bool{
-		"agent_id": true, "team_id": true, "model": true, "provider": true,
-	}
-
-	for _, dim := range dimensions {
-		if !validColumns[dim.idCol] || !validColumns[dim.nameCol] {
-			log.Printf("analytics: skipping invalid dimension column: %s", dim.idCol)
+	for _, dimName := range []string{"agent", "team", "model", "provider"} {
+		colName, ok := dimensionColumns[dimName]
+		if !ok {
 			continue
 		}
 
-		query := fmt.Sprintf(`
-			SELECT
-				%s AS dimension_id,
-				%s AS dimension_name,
-				COALESCE(SUM(cost_usd), 0) AS total_cost,
-				COUNT(*) AS total_requests,
-				COALESCE(SUM(total_tokens), 0) AS total_tokens,
-				COALESCE(AVG(latency_ms), 0) AS avg_latency,
-				COALESCE(SUM(savings_usd), 0) AS total_savings
-			FROM api_requests
-			WHERE timestamp >= $1 AND timestamp <= $2
-			  AND %s != ''
-			GROUP BY %s
-			ORDER BY total_cost DESC
-			LIMIT 100
-		`, dim.idCol, dim.nameCol, dim.idCol, dim.idCol)
+		// Use a pre-defined query per dimension to avoid any string interpolation
+		var query string
+		switch colName {
+		case "agent_id":
+			query = `SELECT agent_id, agent_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND agent_id != '' GROUP BY agent_id ORDER BY 3 DESC LIMIT 100`
+		case "team_id":
+			query = `SELECT team_id, team_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND team_id != '' GROUP BY team_id ORDER BY 3 DESC LIMIT 100`
+		case "model":
+			query = `SELECT model, model, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND model != '' GROUP BY model ORDER BY 3 DESC LIMIT 100`
+		case "provider":
+			query = `SELECT provider, provider, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND timestamp <= $2 AND provider != '' GROUP BY provider ORDER BY 3 DESC LIMIT 100`
+		}
 
 		rows, err := e.pool.Query(ctx, query, from, to)
 		if err != nil {
-			log.Printf("analytics: failed to generate report for dimension %s: %v", dim.name, err)
+			log.Printf("analytics: failed to generate report for dimension %s: %v", dimName, err)
 			continue
 		}
 
 		for rows.Next() {
 			var summary models.CostSummary
-			var dimID, dimName string
-			if err := rows.Scan(&dimID, &dimName, &summary.TotalCostUSD, &summary.TotalRequests,
+			var dimID, dimNameStr string
+			if err := rows.Scan(&dimID, &dimNameStr, &summary.TotalCostUSD, &summary.TotalRequests,
 				&summary.TotalTokens, &summary.AvgLatencyMs, &summary.TotalSavings); err != nil {
-				log.Printf("analytics: error scanning report row for %s: %v", dim.name, err)
+				log.Printf("analytics: error scanning report row for %s: %v", dimName, err)
 				continue
 			}
 
-			summary.Dimension = dim.name
+			summary.Dimension = dimName
 			summary.DimensionID = dimID
-			summary.DimensionName = dimName
+			summary.DimensionName = dimNameStr
 
 			summaries = append(summaries, summary)
 		}
@@ -345,36 +333,23 @@ func (e *InsightsEngine) GetTopSpenders(ctx context.Context, dimension string, l
 		limit = 10
 	}
 
-	var colName string
-	switch dimension {
-	case "agent":
-		colName = "agent_id"
-	case "team":
-		colName = "team_id"
-	case "model":
-		colName = "model"
-	case "provider":
-		colName = "provider"
-	default:
+	colName, ok := dimensionColumns[dimension]
+	if !ok {
 		return nil, fmt.Errorf("analytics: unsupported dimension: %s", dimension)
 	}
 
-	query := fmt.Sprintf(`
-		SELECT
-			%s AS dimension_id,
-			%s AS dimension_name,
-			COALESCE(SUM(cost_usd), 0) AS total_cost,
-			COUNT(*) AS total_requests,
-			COALESCE(SUM(total_tokens), 0) AS total_tokens,
-			COALESCE(AVG(latency_ms), 0) AS avg_latency,
-			COALESCE(SUM(savings_usd), 0) AS total_savings
-		FROM api_requests
-		WHERE timestamp >= $1
-		  AND %s != ''
-		GROUP BY %s
-		ORDER BY total_cost DESC
-		LIMIT $2
-	`, colName, colName, colName, colName)
+	// Use pre-defined queries to avoid identifier interpolation entirely
+	var query string
+	switch colName {
+	case "agent_id":
+		query = `SELECT agent_id, agent_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND agent_id != '' GROUP BY agent_id ORDER BY 3 DESC LIMIT $2`
+	case "team_id":
+		query = `SELECT team_id, team_id, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND team_id != '' GROUP BY team_id ORDER BY 3 DESC LIMIT $2`
+	case "model":
+		query = `SELECT model, model, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND model != '' GROUP BY model ORDER BY 3 DESC LIMIT $2`
+	case "provider":
+		query = `SELECT provider, provider, COALESCE(SUM(cost_usd), 0), COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(savings_usd), 0) FROM api_requests WHERE timestamp >= $1 AND provider != '' GROUP BY provider ORDER BY 3 DESC LIMIT $2`
+	}
 
 	rows, err := e.pool.Query(ctx, query, since, limit)
 	if err != nil {
