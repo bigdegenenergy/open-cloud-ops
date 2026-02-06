@@ -28,6 +28,7 @@ class AWSProvider(CloudProvider):
     def __init__(self, settings=None):
         self._settings = settings or get_settings()
         self._session = self._build_session()
+        self._account_id: str | None = None  # Cached after first STS call
 
     # ------------------------------------------------------------------
     # CloudProvider interface
@@ -174,9 +175,12 @@ class AWSProvider(CloudProvider):
         return boto3.Session(**kwargs)
 
     def _get_account_id(self) -> str:
+        if self._account_id is not None:
+            return self._account_id
         try:
             sts = self._session.client("sts")
-            return sts.get_caller_identity()["Account"]
+            self._account_id = sts.get_caller_identity()["Account"]
+            return self._account_id
         except Exception:
             return "unknown"
 

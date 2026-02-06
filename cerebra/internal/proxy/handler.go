@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,11 +63,17 @@ type ProxyHandler struct {
 	// spillMu protects the spill file for overflow log entries
 	spillMu   sync.Mutex
 	spillFile *os.File
+	spillPath string // Base path for spill file (configurable via CEREBRA_SPILL_PATH)
 }
 
 // NewProxyHandler creates a new ProxyHandler instance with all required dependencies.
 // It starts a background worker to drain the log queue; call DrainLogs() before shutdown.
 func NewProxyHandler(pool *pgxpool.Pool, enforcer *budget.Enforcer, pricing map[string]models.ModelPricing) *ProxyHandler {
+	spillPath := os.Getenv("CEREBRA_SPILL_PATH")
+	if spillPath == "" {
+		spillPath = os.TempDir()
+	}
+
 	h := &ProxyHandler{
 		pool:     pool,
 		enforcer: enforcer,
@@ -79,7 +86,8 @@ func NewProxyHandler(pool *pgxpool.Pool, enforcer *budget.Enforcer, pricing map[
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		logCh: make(chan models.APIRequest, logQueueSize),
+		logCh:     make(chan models.APIRequest, logQueueSize),
+		spillPath: spillPath,
 	}
 
 	// Start a single background worker to process log entries
@@ -518,19 +526,22 @@ func (h *ProxyHandler) spillToDisk(req models.APIRequest) {
 	h.spillMu.Lock()
 	defer h.spillMu.Unlock()
 
+	spillFile := filepath.Join(h.spillPath, "cerebra-log-spill.jsonl")
+	spillFileRotated := spillFile + ".1"
+
 	// Rotate the spill file if it exceeds the size cap
 	if h.spillFile != nil {
 		if fi, err := h.spillFile.Stat(); err == nil && fi.Size() >= maxSpillBytes {
 			h.spillFile.Close()
-			os.Remove("cerebra-log-spill.jsonl.1")
-			os.Rename("cerebra-log-spill.jsonl", "cerebra-log-spill.jsonl.1")
+			os.Remove(spillFileRotated)
+			os.Rename(spillFile, spillFileRotated)
 			h.spillFile = nil
 			log.Printf("proxy: rotated spill file (exceeded %d bytes)", maxSpillBytes)
 		}
 	}
 
 	if h.spillFile == nil {
-		f, err := os.OpenFile("cerebra-log-spill.jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		f, err := os.OpenFile(spillFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
 			log.Printf("proxy: failed to open spill file: %v (log entry %s lost)", err, req.ID)
 			return

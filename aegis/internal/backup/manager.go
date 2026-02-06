@@ -167,7 +167,10 @@ func (m *BackupManager) CreateJob(ctx context.Context, job models.BackupJob) (*m
 	job.CreatedAt = now
 
 	// Calculate next run from schedule
-	nextRun := calculateNextRun(job.Schedule, now)
+	nextRun, err := calculateNextRun(job.Schedule, now)
+	if err != nil {
+		return nil, fmt.Errorf("backup: invalid schedule for job %q: %w", job.Name, err)
+	}
 	job.NextRun = &nextRun
 
 	m.mu.Lock()
@@ -361,8 +364,12 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 	m.mu.Lock()
 	if j, ok := m.jobs[jobID]; ok {
 		j.LastRun = &completedAt
-		nextRun := calculateNextRun(j.Schedule, completedAt)
-		j.NextRun = &nextRun
+		nextRun, schedErr := calculateNextRun(j.Schedule, completedAt)
+		if schedErr != nil {
+			log.Printf("backup: warning: could not compute next run for job %s: %v", jobID, schedErr)
+		} else {
+			j.NextRun = &nextRun
+		}
 		if m.store != nil {
 			jCopy := *j
 			go func() { logStoreErr("SaveJob(lastRun)", m.store.SaveJob(ctx, &jCopy)) }()
@@ -724,41 +731,108 @@ func deriveKeys(masterKey []byte) (encKey, macKey []byte) {
 }
 
 // calculateNextRun computes the next run time from a cron-like schedule string.
-// This is a simplified implementation that supports common intervals:
-//   - "@hourly"  -> next hour
-//   - "@daily"   -> next day at midnight
-//   - "@weekly"  -> next Monday at midnight
-//   - "*/N * * * *" -> every N minutes
 //
-// A full cron parser (e.g., robfig/cron) should be used in production.
-func calculateNextRun(schedule string, from time.Time) time.Time {
-	switch strings.ToLower(strings.TrimSpace(schedule)) {
+// Supported schedule formats:
+//
+//	Shorthand aliases:
+//	  @hourly   -> next hour boundary
+//	  @daily    -> next midnight (00:00 UTC)
+//	  @weekly   -> next Monday at midnight
+//	  @monthly  -> 1st of next month at midnight
+//	  @every_Nm -> every N minutes (e.g. @every_15m)
+//	  @every_Nh -> every N hours   (e.g. @every_6h)
+//
+//	Cron-like patterns (minute and hour fields only):
+//	  */N * * * *  -> every N minutes
+//	  M  */N * * * -> at minute M, every N hours
+//	  M  H  * * *  -> daily at H:M
+//
+// For full 5-field cron semantics (day-of-month, month, day-of-week),
+// use a production cron library such as github.com/robfig/cron/v3.
+//
+// Returns (nextRun, nil) on success, or (zero, error) for unrecognised schedules.
+func calculateNextRun(schedule string, from time.Time) (time.Time, error) {
+	s := strings.ToLower(strings.TrimSpace(schedule))
+
+	// --- Shorthand aliases ---
+	switch s {
 	case "@hourly":
-		return from.Truncate(time.Hour).Add(time.Hour)
+		return from.Truncate(time.Hour).Add(time.Hour), nil
 	case "@daily":
 		next := from.Truncate(24 * time.Hour).Add(24 * time.Hour)
-		return next
+		return next, nil
 	case "@weekly":
-		// Next Monday at midnight
 		daysUntilMonday := (8 - int(from.Weekday())) % 7
 		if daysUntilMonday == 0 {
 			daysUntilMonday = 7
 		}
-		return from.Truncate(24*time.Hour).AddDate(0, 0, daysUntilMonday)
-	default:
-		// Parse simple "*/N * * * *" format (every N minutes)
-		if strings.HasPrefix(schedule, "*/") {
-			parts := strings.Fields(schedule)
-			if len(parts) >= 1 {
-				intervalStr := strings.TrimPrefix(parts[0], "*/")
-				var interval int
-				fmt.Sscanf(intervalStr, "%d", &interval)
-				if interval > 0 {
-					return from.Add(time.Duration(interval) * time.Minute)
+		return from.Truncate(24*time.Hour).AddDate(0, 0, daysUntilMonday), nil
+	case "@monthly":
+		y, m, _ := from.Date()
+		return time.Date(y, m+1, 1, 0, 0, 0, 0, from.Location()), nil
+	}
+
+	// --- @every_Nm / @every_Nh ---
+	if strings.HasPrefix(s, "@every_") {
+		suffix := strings.TrimPrefix(s, "@every_")
+		if len(suffix) < 2 {
+			return time.Time{}, fmt.Errorf("backup: invalid schedule %q: @every_ requires a value like @every_15m", schedule)
+		}
+		unit := suffix[len(suffix)-1]
+		var n int
+		if _, err := fmt.Sscanf(suffix[:len(suffix)-1], "%d", &n); err != nil || n <= 0 {
+			return time.Time{}, fmt.Errorf("backup: invalid schedule %q: could not parse interval", schedule)
+		}
+		switch unit {
+		case 'm':
+			return from.Add(time.Duration(n) * time.Minute), nil
+		case 'h':
+			return from.Add(time.Duration(n) * time.Hour), nil
+		default:
+			return time.Time{}, fmt.Errorf("backup: invalid schedule %q: unit must be 'm' or 'h'", schedule)
+		}
+	}
+
+	// --- Cron-like 5-field patterns (partial support) ---
+	parts := strings.Fields(s)
+	if len(parts) == 5 {
+		minute, hour := parts[0], parts[1]
+
+		// "*/N * * * *" -> every N minutes
+		if strings.HasPrefix(minute, "*/") {
+			var n int
+			if _, err := fmt.Sscanf(strings.TrimPrefix(minute, "*/"), "%d", &n); err == nil && n > 0 {
+				return from.Add(time.Duration(n) * time.Minute), nil
+			}
+		}
+
+		// "M */N * * *" -> at minute M, every N hours
+		if strings.HasPrefix(hour, "*/") {
+			var m, n int
+			if _, err := fmt.Sscanf(minute, "%d", &m); err == nil && m >= 0 && m < 60 {
+				if _, err := fmt.Sscanf(strings.TrimPrefix(hour, "*/"), "%d", &n); err == nil && n > 0 {
+					next := from.Truncate(time.Hour)
+					next = time.Date(next.Year(), next.Month(), next.Day(), next.Hour(), m, 0, 0, next.Location())
+					if !next.After(from) {
+						next = next.Add(time.Duration(n) * time.Hour)
+					}
+					return next, nil
 				}
 			}
 		}
-		// Default: run in 1 hour
-		return from.Add(time.Hour)
+
+		// "M H * * *" -> daily at H:M
+		var m, h int
+		if _, err := fmt.Sscanf(minute, "%d", &m); err == nil && m >= 0 && m < 60 {
+			if _, err := fmt.Sscanf(hour, "%d", &h); err == nil && h >= 0 && h < 24 {
+				next := time.Date(from.Year(), from.Month(), from.Day(), h, m, 0, 0, from.Location())
+				if !next.After(from) {
+					next = next.AddDate(0, 0, 1)
+				}
+				return next, nil
+			}
+		}
 	}
+
+	return time.Time{}, fmt.Errorf("backup: unrecognised schedule %q; use @hourly, @daily, @weekly, @monthly, @every_Nm, @every_Nh, or a 5-field cron pattern", schedule)
 }
