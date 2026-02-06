@@ -39,12 +39,10 @@ jobs:
         id: check-perms
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
-          # Check if the PR author has write access or is a collaborator
-          AUTHOR="${{ github.event.pull_request.user.login }}"
-          REPO="${{ github.repository }}"
 
           # Check user permission level (admin, write, read, none)
           PERMISSION=$(gh api repos/"$REPO"/collaborators/"$AUTHOR"/permission --jq '.permission' 2>/dev/null || echo "none")
@@ -64,14 +62,18 @@ jobs:
     if: needs.check-perms.outputs.can-review == 'true'
 
     steps:
-      - name: 🔑 Check for API key
+      - name: 🔑 Check for API key (defer to combined workflow if both keys exist)
         id: check-key
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           if [ -z "$GEMINI_API_KEY" ]; then
             echo "::notice::GEMINI_API_KEY not configured. Skipping AI review."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ -n "$OPENAI_API_KEY" ]; then
+            echo "::notice::Both GEMINI_API_KEY and OPENAI_API_KEY configured. Deferring to combined-pr-review workflow."
             echo "skip=true" >> $GITHUB_OUTPUT
           else
             echo "skip=false" >> $GITHUB_OUTPUT
@@ -104,11 +106,10 @@ jobs:
         id: ctx
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
           mkdir -p /tmp/pr
 
           # FIXED: Removed lockfiles from exclusions (Security)
@@ -390,6 +391,8 @@ jobs:
 
       - name: 🚀 Push Instructions to Branch
         if: steps.check-key.outputs.skip != 'true' && steps.gemini.outputs.has_feedback == 'true'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -397,8 +400,8 @@ jobs:
 
           # Fetch latest remote state to avoid rebase conflicts
           # This handles the case where Claude Code deleted REVIEW_INSTRUCTIONS.md
-          git fetch origin ${{ github.head_ref }}
-          git reset --hard origin/${{ github.head_ref }}
+          git fetch origin "$HEAD_REF"
+          git reset --hard "origin/$HEAD_REF"
 
           # Now add the new instructions file on top of latest remote
           # Use -f because REVIEW_INSTRUCTIONS.md is in .gitignore (it's a transient CI artifact)
@@ -409,11 +412,13 @@ jobs:
 
       - name: 🧹 Cleanup stale instructions
         if: steps.check-key.outputs.skip != 'true' && steps.gemini.outputs.decision == 'APPROVE'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
           # Fetch latest remote state first
-          git fetch origin ${{ github.head_ref }}
-          git reset --hard origin/${{ github.head_ref }}
+          git fetch origin "$HEAD_REF"
+          git reset --hard "origin/$HEAD_REF"
 
           # Only cleanup if file still exists after reset
           if [ -f "REVIEW_INSTRUCTIONS.md" ]; then
@@ -430,9 +435,9 @@ jobs:
           # Use GITHUB_TOKEN so comment appears from github-actions[bot], not the user
           # This prevents the Claude Code implementer from treating it as user input
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          PR_NUMBER="${{ github.event.pull_request.number }}"
           gh pr comment "$PR_NUMBER" --body-file /tmp/pr/comment.md || echo "Comment failed"
 
       - name: 📱 Telegram notification

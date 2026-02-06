@@ -605,7 +605,6 @@ jobs:
         if: steps.extract-script.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail

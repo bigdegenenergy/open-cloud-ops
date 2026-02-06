@@ -108,6 +108,12 @@ func (db *DB) UpsertBudget(ctx context.Context, b *models.Budget) error {
 	return err
 }
 
+// DeleteBudget removes a budget by scope and entity ID.
+func (db *DB) DeleteBudget(ctx context.Context, scope, entityID string) error {
+	_, err := db.Pool.Exec(ctx, `DELETE FROM budgets WHERE scope = $1 AND entity_id = $2`, scope, entityID)
+	return err
+}
+
 // UpdateBudgetSpend atomically increments the spent amount for a budget.
 func (db *DB) UpdateBudgetSpend(ctx context.Context, scope, entityID string, amount float64) error {
 	_, err := db.Pool.Exec(ctx, `

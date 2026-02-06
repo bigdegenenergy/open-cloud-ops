@@ -160,9 +160,14 @@ func (h *Handlers) CreateBudget(c *gin.Context) {
 		return
 	}
 
-	// Also set the budget in Redis for fast enforcement.
+	// Sync the budget to Redis for fast enforcement.
+	// On failure, rollback the DB write to prevent an unenforced budget.
 	if err := h.enforcer.SetBudget(budget.BudgetScope(req.Scope), req.EntityID, req.LimitUSD); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "budget saved to DB but failed to sync to cache"})
+		log.Printf("Redis sync failed for budget %s/%s, rolling back DB: %v", req.Scope, req.EntityID, err)
+		if rbErr := h.db.DeleteBudget(c.Request.Context(), req.Scope, req.EntityID); rbErr != nil {
+			log.Printf("Rollback also failed for budget %s/%s: %v", req.Scope, req.EntityID, rbErr)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to sync budget to cache, operation rolled back"})
 		return
 	}
 

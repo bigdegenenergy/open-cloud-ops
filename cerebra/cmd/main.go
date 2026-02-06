@@ -171,6 +171,12 @@ func main() {
 
 	// LLM Proxy routes — the core gateway.
 	proxyGroup := r.Group("/v1/proxy")
+	if cfg.ProxyAPIKey != "" {
+		proxyGroup.Use(apiKeyAuth(cfg.ProxyAPIKey))
+		log.Println("Proxy endpoint authentication enabled.")
+	} else {
+		log.Println("WARNING: CEREBRA_PROXY_API_KEY not set. Proxy endpoints are open (intended for private network use).")
+	}
 	{
 		proxyGroup.Any("/openai/*path", proxyHandler.HandleOpenAI)
 		proxyGroup.Any("/anthropic/*path", proxyHandler.HandleAnthropic)

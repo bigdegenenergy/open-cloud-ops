@@ -36,13 +36,20 @@ export USER="$USER"
 
 # Execute Python safely using environment variables
 python3 -c '
-import os
-from .claude.workflows.lobster import WorkflowEngine
+import os, sys, importlib.util
 
 workflow_id = os.environ.get("WORKFLOW_ID", "")
 user = os.environ.get("USER", "")
 
-engine = WorkflowEngine()
+# Load from hidden directory using importlib (dot-prefixed dirs are not valid packages)
+spec = importlib.util.spec_from_file_location(
+    "workflow_engine",
+    os.path.join(os.getcwd(), ".claude", "workflows", "lobster.py")
+)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+engine = mod.WorkflowEngine()
 state = engine.approve(workflow_id, approved_by=user)
 '
 ```

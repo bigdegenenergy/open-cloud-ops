@@ -13,8 +13,9 @@ type Config struct {
 	Port     string
 	LogLevel string
 
-	// Management API
-	AdminAPIKey string // Required for /api/v1 endpoints; empty = no auth
+	// Authentication
+	AdminAPIKey string // Required for /api/v1 management endpoints; empty = disabled (fail-secure)
+	ProxyAPIKey string // Optional client key for /v1/proxy endpoints; empty = no proxy auth
 
 	// Database
 	DBHost     string
@@ -47,12 +48,13 @@ func Load() (*Config, error) {
 		LogLevel: getEnv("CEREBRA_LOG_LEVEL", "info"),
 
 		AdminAPIKey: os.Getenv("CEREBRA_ADMIN_API_KEY"),
+		ProxyAPIKey: os.Getenv("CEREBRA_PROXY_API_KEY"),
 
 		DBHost:     getEnv("POSTGRES_HOST", "localhost"),
 		DBName:     getEnv("POSTGRES_DB", "opencloudops"),
 		DBUser:     getEnv("POSTGRES_USER", "oco_user"),
 		DBPassword: getEnv("POSTGRES_PASSWORD", ""),
-		DBSSLMode:  getEnv("POSTGRES_SSLMODE", "disable"),
+		DBSSLMode:  getEnv("POSTGRES_SSLMODE", "prefer"),
 
 		RedisHost:     getEnv("REDIS_HOST", "localhost"),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),

@@ -28,6 +28,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.RedisPort != 6379 {
 		t.Errorf("expected default Redis port 6379, got %d", cfg.RedisPort)
 	}
+	if cfg.DBSSLMode != "prefer" {
+		t.Errorf("expected default DBSSLMode prefer, got %s", cfg.DBSSLMode)
+	}
 }
 
 func TestLoad_CustomValues(t *testing.T) {

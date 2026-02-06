@@ -66,17 +66,24 @@ func NewRouter(strategy RoutingStrategy) *Router {
 
 // Route determines the optimal model for a given request.
 // It analyzes the query complexity and returns the recommended model.
+// Always returns a non-nil ModelEntry; falls back to a passthrough entry
+// using the requested model name if no match is found.
 func (r *Router) Route(requestedModel string, inputLength int) *ModelEntry {
+	var result *ModelEntry
 	switch r.Strategy {
 	case StrategyCostOptimized:
-		return r.routeCostOptimized(requestedModel, inputLength)
+		result = r.routeCostOptimized(requestedModel, inputLength)
 	case StrategyQualityFirst:
-		return r.routeQualityFirst(requestedModel)
+		result = r.routeQualityFirst(requestedModel)
 	case StrategyLatencyOptimized:
-		return r.routeLatencyOptimized()
+		result = r.routeLatencyOptimized()
 	default:
-		return r.findModel(requestedModel)
+		result = r.findModel(requestedModel)
 	}
+	if result == nil {
+		return &ModelEntry{Provider: "unknown", Model: requestedModel, Tier: TierStandard}
+	}
+	return result
 }
 
 // routeCostOptimized routes to the cheapest model that can handle the request.
