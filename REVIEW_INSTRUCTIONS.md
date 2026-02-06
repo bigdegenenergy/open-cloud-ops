@@ -5,7 +5,7 @@
 ```json
 {
   "review": {
-    "summary": "The platform implementation is robust and well-hardened against common web vulnerabilities. However, the AI Dev Toolkit configuration introduces critical supply chain risks and some architectural inconsistencies in the Python module's concurrency model.",
+    "summary": "Solid polyglot architecture with impressive AI-driven automation. However, critical issues exist regarding financial accuracy (static exchange rates), supply chain security in the config sync workflow, and scalability bottlenecks in the FinOps API.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
@@ -14,54 +14,63 @@
       "severity": "critical",
       "file": ".github/workflows/sync-claude-config.yml",
       "line": 1,
-      "title": "High-Risk Supply Chain Vulnerability",
-      "description": "The sync-claude-config workflow is configured to automatically pull and overwrite .claude/ directory content, hooks, and .github/workflows from an external source repository. This allows an external entity to inject malicious shell scripts into local git hooks or modify CI pipelines without a dedicated security review of the specific changes.",
-      "suggestion": "Pin the source repository to a specific Git SHA rather than a branch, and implement a manual approval gate before any synchronized files are applied to the local repository."
+      "title": "Unpinned supply chain risk in configuration sync",
+      "description": "The workflow automatically pulls and overwrites local executable hooks, scripts, and workflows from an external repository (ai-dev-toolkit). While commit round 6 pinned some refs, the overall pattern of auto-syncing executable content without a hard-coded commit SHA for the source content is a major supply chain vector.",
+      "suggestion": "Require manual approval for the sync PR and implement a hash-verification step for all incoming .sh and .py files before they are merged into the main branch."
     },
     {
       "id": 2,
       "severity": "important",
-      "file": "economist/pkg/cloud/aws.py",
-      "line": 1,
-      "title": "Blocking Calls in Async Methods",
-      "description": "Methods like get_costs and get_resources are marked as 'async' but use 'boto3', which is a synchronous, blocking library. Using these inside asyncio.gather in the collector will block the event loop, effectively making the 'parallel' collection serial and degrading performance.",
-      "suggestion": "Use 'aioboto3' for true asynchronous AWS calls or wrap the synchronous boto3 calls in 'run_in_executor' to prevent blocking the event loop."
+      "file": "economist/pkg/cost/calculator.py",
+      "line": 45,
+      "title": "Static exchange rates in financial calculations",
+      "description": "The 'normalize_cost' function uses a hardcoded dict for EUR, GBP, and JPY exchange rates. For a FinOps tool, this leads to significant inaccuracies as currency markets fluctuate, rendering cost aggregation and forecasting invalid over time.",
+      "suggestion": "Integrate a lightweight caching currency API (e.g., Frankfurter or Fixer) or at least allow rates to be passed via an environment variable that can be updated without a code deploy."
     },
     {
       "id": 3,
       "severity": "important",
-      "file": "aegis/internal/backup/manager.go",
-      "line": 150,
-      "title": "Fail-Open Encryption Configuration",
-      "description": "The backup manager checks for the presence of AEGIS_BACKUP_ENCRYPTION_KEY. If the key is missing or empty, it proceeds to create unencrypted backups silently. In a resilience/security engine, encryption-at-rest should typically fail-closed if configured but unavailable.",
-      "suggestion": "Add a configuration flag AEGIS_ENCRYPTION_REQUIRED. If true and the key is missing, the backup job should fail with an error instead of proceeding unencrypted."
+      "file": "economist/api/routes.py",
+      "line": 65,
+      "title": "Lack of pagination on high-volume cost endpoints",
+      "description": "Endpoints like /costs/summary and /costs/breakdown call .all() on SQLAlchemy queries. Cloud billing data can easily scale to millions of rows; fetching all records into memory will lead to OOM errors or Gateway Timeouts (504).",
+      "suggestion": "Implement Keyset or Offset pagination and use database-level aggregation (SQL GROUP BY) for summaries instead of Python-level loops."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": "cerebra/internal/analytics/insights.go",
-      "line": 45,
-      "title": "Potential Database Performance Degredation",
-      "description": "SQL queries in DetectSpikes and GenerateReport perform broad aggregations (SUM, AVG) over the api_requests table for 7-day and 30-day windows. As this table is a TimescaleDB hypertable that will grow rapidly, these queries will eventually cause high CPU load and timeouts without materialized views or specialized continuous aggregates.",
-      "suggestion": "Implement TimescaleDB Continuous Aggregates for hourly and daily cost summaries to ensure analytics queries remain performant as the dataset grows."
+      "file": "aegis/internal/backup/manager.go",
+      "line": 312,
+      "title": "Manual Encrypt-then-MAC implementation",
+      "description": "The streaming encryption uses AES-CTR followed by HMAC-SHA256. While conceptually sound for streaming, manual implementation of Encrypt-then-MAC is prone to subtle implementation errors (e.g. IV/nonce reuse or MAC-then-Encrypt slips).",
+      "suggestion": "Consider using an established AEAD implementation that supports streaming, such as age (via filippo.io/age) or a standard envelope encryption pattern with KMS."
     },
     {
       "id": 5,
       "severity": "suggestion",
-      "file": "cerebra/pkg/cache/cache.go",
-      "line": 85,
-      "title": "Inaccurate Rate Limit Window",
-      "description": "The RateLimitCheck uses a fixed-window counter via 'Incr' and 'Expire'. Calling 'Expire' on every request resets the TTL, which can lead to a 'Livelock' where a user is blocked for much longer than the intended window if they continue to send requests while throttled.",
-      "suggestion": "Only call 'Expire' if the result of 'Incr' is 1, ensuring the window starts from the first request and is not extended by subsequent blocked attempts."
+      "file": "cerebra/internal/router/router.go",
+      "line": 245,
+      "title": "Naive token estimation",
+      "description": "The router estimates tokens as len(text)/4. This is highly inaccurate for code (which has high symbol density) and CJK languages. This could lead to incorrect routing decisions or budget bypasses.",
+      "suggestion": "Integrate a lightweight tokenizer library like tiktoken-go or implement specific heuristics for code blocks vs. natural language."
     },
     {
       "id": 6,
       "severity": "suggestion",
-      "file": "aegis/cmd/main.go",
-      "line": 210,
-      "title": "Lack of Scheduler Jitter",
-      "description": "The background scheduler ticker runs every 60 seconds and executes all due jobs in a loop. In a large-scale environment, this can lead to 'thundering herd' issues where many heavy backup operations start at the exact same second.",
-      "suggestion": "Introduce a random jitter (e.g., 0-5 seconds) before starting each individual backup job to distribute load."
+      "file": "economist/internal/optimizer/engine.py",
+      "line": 110,
+      "title": "Hardcoded optimization heuristics",
+      "description": "Savings estimates for rightsizing and spot instances are hardcoded 'placeholders' ($100, $50). This reduces the utility of the recommendations for users looking for actual ROI.",
+      "suggestion": "Pull real-time pricing data from the cloud provider objects to calculate the delta between current and recommended instance types."
+    },
+    {
+      "id": 7,
+      "severity": "important",
+      "file": ".claude/hooks/auto-approve.sh",
+      "line": 45,
+      "title": "Potential for test-driven code execution",
+      "description": "The script auto-approves 'pytest' and 'cargo test'. If an agent modifies a test file to include a malicious payload (e.g., os.system('curl ...')) and then runs the test, the hook will allow it without user intervention.",
+      "suggestion": "Disable auto-approval for test runners if any files in the test directory have been modified in the same session, or use a restricted sandbox for test execution."
     }
   ]
 }
