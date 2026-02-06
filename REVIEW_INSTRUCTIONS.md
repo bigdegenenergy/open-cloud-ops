@@ -5,81 +5,63 @@
 ```json
 {
   "review": {
-    "summary": "The platform provides a robust multi-service architecture (Go/Python) with a sophisticated AI-driven development loop. However, critical security and stability issues persist: Aegis auth is structural only, Cerebra/Aegis both suffer from potential OOM via full body/buffer reading, and SQL construction in analytics remains vulnerable. Requesting changes to harden these areas before production deployment.",
+    "summary": "The PR implements a massive feature set with high architectural quality, but contains critical security vulnerabilities (timing attacks, command injection) and significant stability risks (OOM in backup logic) that require immediate remediation.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
     {
       "id": 1,
       "severity": "critical",
-      "file": "aegis/api/handlers.go",
-      "line": 45,
-      "title": "Insecure Authentication Logic",
-      "description": "The APIKeyAuth middleware only validates that the key length is >= 16. It does not perform any cryptographic verification or database lookup, allowing any string of sufficient length to bypass authentication.",
-      "suggestion": "Implement a proper lookup using a hashed version of the key against the api_keys table, similar to the implementation in Cerebra."
+      "file": "cerebra/internal/middleware/middleware.go",
+      "line": 0,
+      "title": "Variable-time API Key comparison",
+      "description": "The AuthMiddleware compares SHA-256 hashes using standard inequality operators (`storedHash != keyHash`). This is vulnerable to timing attacks, allowing an attacker to reconstruct the valid hash byte-by-byte by measuring response times.",
+      "suggestion": "Use `crypto/subtle.ConstantTimeCompare` for all sensitive credential comparisons."
     },
     {
       "id": 2,
-      "severity": "critical",
+      "severity": "important",
       "file": "aegis/internal/backup/manager.go",
-      "line": 150,
-      "title": "Potential OOM via Memory Buffering",
-      "description": "The createArchive function collects all Kubernetes resources and creates a tar.gz archive entirely in memory using bytes.Buffer or io.ReadAll. For large clusters, this will cause the service to crash with an Out of Memory error.",
-      "suggestion": "Use a streaming approach: pipe the tar/gzip writer directly to the file/storage writer instead of buffering the entire content in RAM."
+      "line": 0,
+      "title": "OOM risk in backup archiving",
+      "description": "The `createArchive` function utilizes `io.ReadAll` to load the entire backup archive into a byte slice before processing. For Kubernetes clusters with significant resource counts or large secrets/configmaps, this will lead to Out-Of-Memory (OOM) crashes of the Aegis service.",
+      "suggestion": "Refactor the backup pipeline to use `io.Pipe` or stream directly to the storage backend using `io.Writer` interfaces instead of buffering the entire archive in memory."
     },
     {
       "id": 3,
       "severity": "critical",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 110,
-      "title": "DoS Vulnerability via Unbounded Response Buffering",
-      "description": "The proxy handler uses io.ReadAll to read the entire response from upstream providers (OpenAI/Anthropic). While the request has a 10MB limit, the response does not, allowing a malicious or malfunctioning upstream to exhaust server memory.",
-      "suggestion": "Implement a LimitReader on the response body or stream the response directly to the client while calculating tokens on-the-fly."
+      "file": ".claude/workflows/lobster/engine.py",
+      "line": 0,
+      "title": "Shell Command Injection in Workflow Engine",
+      "description": "The engine uses `subprocess.run(..., shell=True)` and performs manual string replacement for variables `{{ var }}`. If a workflow definition uses variables sourced from external inputs (like PR titles or chat messages), an attacker can execute arbitrary commands on the runner environment.",
+      "suggestion": "Avoid `shell=True`. Pass arguments as a list and use `shlex.split` for command parsing, or ensure that all variable interpolation is strictly sanitized/validated against a whitelist before execution."
     },
     {
       "id": 4,
-      "severity": "critical",
-      "file": "cerebra/internal/analytics/insights.go",
-      "line": 150,
-      "title": "SQL Injection Risk",
-      "description": "The GenerateReport and GetTopSpenders functions use fmt.Sprintf to interpolate column names into SQL queries. Even with an allowlist, string interpolation for identifiers is a dangerous pattern.",
-      "suggestion": "Use pgx.Identifier to safely quote identifiers or restrict identifier selection to a strict mapping that does not use direct string interpolation."
+      "severity": "important",
+      "file": "cerebra/internal/proxy/handler.go",
+      "line": 0,
+      "title": "Potential data loss in asynchronous logging",
+      "description": "Request metadata is logged asynchronously via `go h.logRequest(reqCtx)`. If the Cerebra process crashes or is restarted immediately after a proxy response but before the goroutine completes, billing and audit data for that request will be lost.",
+      "suggestion": "Use a buffered channel and a worker pool with a graceful shutdown handler that flushes the channel, or log synchronously if data integrity for billing is a hard requirement."
     },
     {
       "id": 5,
-      "severity": "important",
+      "severity": "suggestion",
       "file": "economist/pkg/cost/calculator.py",
-      "line": 45,
-      "title": "Floating Point for Currency Math",
-      "description": "The calculator uses Python floats for currency normalization and aggregation. This will lead to precision errors (e.g., 0.1 + 0.2 != 0.3) which are unacceptable for financial/billing applications.",
-      "suggestion": "Refactor all cost calculations to use the 'decimal.Decimal' class."
+      "line": 0,
+      "title": "Static exchange rates in financial calculations",
+      "description": "The calculator uses a static dictionary for currency exchange rates. In a FinOps context, this will lead to increasingly inaccurate reports as market conditions change.",
+      "suggestion": "Implement a caching provider that fetches daily rates from a reliable source (e.g., Fixer.io or Open Exchange Rates) with a fallback to the static registry."
     },
     {
       "id": 6,
       "severity": "important",
-      "file": ".claude/hooks/auto-approve.sh",
-      "line": 20,
-      "title": "Shell Injection Bypass Risk",
-      "description": "The hook uses regex to block characters like ';', '&', and '|'. This is insufficient to prevent shell injection, as bypasses using subshells $(...), backticks, or newline-delimited commands are likely possible.",
-      "suggestion": "Instead of a blacklist, use a strict whitelist of exact command paths and arguments, or rely on a safer execution environment that doesn't spawn a full shell."
-    },
-    {
-      "id": 7,
-      "severity": "important",
-      "file": "economist/api/routes.py",
-      "line": 10,
-      "title": "Missing API Authentication",
-      "description": "The Economist FastAPI endpoints lack any authentication or authorization decorators, exposing sensitive cloud cost and governance data to unauthenticated network access.",
-      "suggestion": "Implement a Security dependency (e.g., APIKey header) on all sensitive routes."
-    },
-    {
-      "id": 8,
-      "severity": "suggestion",
       "file": "deploy/docker/docker-compose.yml",
-      "line": 85,
-      "title": "Insecure Default Credentials",
-      "description": "Hardcoded default passwords and 'admin/admin' credentials for Grafana are present in the configuration.",
-      "suggestion": "Remove default credentials and use environment variables for all secrets, ensuring they are not committed to version control."
+      "line": 0,
+      "title": "Hardcoded default credentials in deployment",
+      "description": "The compose file contains hardcoded passwords like 'change_me_to_a_strong_password'. While useful for dev, these often leak into production environments if not strictly gated.",
+      "suggestion": "Remove default password values and force the use of an `.env` file that is listed in `.gitignore`, or use Docker Secrets."
     }
   ]
 }
