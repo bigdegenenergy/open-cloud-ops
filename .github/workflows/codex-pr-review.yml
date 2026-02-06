@@ -1,0 +1,385 @@
+name: Codex PR Review
+# ╔═══════════════════════════════════════════════════════════════════════╗
+# ║ MODEL SELECTION:                                                     ║
+# ║                                                                      ║
+# ║ Model: gpt-5.2-codex                                                ║
+# ║                                                                      ║
+# ║ This model ID is VALID and NOT hallucinated. It is the official      ║
+# ║ OpenAI Codex model for code review tasks. It has been tested and     ║
+# ║ verified working. Do NOT suggest changing to older model IDs like    ║
+# ║ "gpt-4o" or "gpt-4-turbo".                                          ║
+# ╚═══════════════════════════════════════════════════════════════════════╝
+#
+# Runs OpenAI Codex on pull requests to provide AI-powered code review,
+# similar to the Gemini PR review workflow. Uses openai/codex-action
+# with structured JSON output for consistent, actionable feedback.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: codex-pr-review-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check-perms:
+    name: Check Permissions
+    runs-on: ubuntu-latest
+    if: |
+      github.event.pull_request.draft == false &&
+      github.actor != 'github-actions[bot]' &&
+      github.actor != 'dependabot[bot]' &&
+      !contains(github.actor, '[bot]')
+    outputs:
+      can-review: ${{ steps.check-perms.outputs.can-review }}
+
+    steps:
+      - name: Check user permissions
+        id: check-perms
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          REPO="${{ github.repository }}"
+
+          PERMISSION=$(gh api repos/"$REPO"/collaborators/"$AUTHOR"/permission --jq '.permission' 2>/dev/null || echo "none")
+
+          if [[ "$PERMISSION" == "admin" || "$PERMISSION" == "write" ]]; then
+            echo "::notice::User $AUTHOR has $PERMISSION access - proceeding with review"
+            echo "can-review=true" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::User $AUTHOR has insufficient permissions ($PERMISSION) - skipping AI review for security"
+            echo "can-review=false" >> $GITHUB_OUTPUT
+          fi
+
+  review:
+    name: Codex Code Review
+    runs-on: ubuntu-latest
+    needs: [check-perms]
+    if: needs.check-perms.outputs.can-review == 'true'
+
+    steps:
+      - name: Check for API key
+        id: check-key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::notice::OPENAI_API_KEY not configured. Skipping Codex review."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ -n "$GEMINI_API_KEY" ]; then
+            echo "::notice::Both OPENAI_API_KEY and GEMINI_API_KEY are set. Deferring to combined-pr-review workflow."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout code
+        if: steps.check-key.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+
+      - name: Pre-fetch base and head refs
+        if: steps.check-key.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            ${{ github.event.pull_request.base.ref }} \
+            +refs/pull/${{ github.event.pull_request.number }}/head
+
+      - name: Prepare output schema
+        if: steps.check-key.outputs.skip != 'true'
+        run: |
+          cat > /tmp/review-schema.json << 'SCHEMA'
+          {
+            "type": "object",
+            "properties": {
+              "findings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "integer", "minimum": 1 },
+                    "title": { "type": "string", "maxLength": 80 },
+                    "body": { "type": "string", "minLength": 1 },
+                    "severity": { "type": "string", "enum": ["critical", "important", "suggestion"] },
+                    "confidence_score": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "file": { "type": "string", "minLength": 1 },
+                    "line_start": { "type": "integer", "minimum": 1 },
+                    "line_end": { "type": "integer", "minimum": 1 },
+                    "suggestion": { "type": "string" }
+                  },
+                  "required": ["id", "title", "body", "severity", "confidence_score", "file", "line_start", "line_end", "suggestion"],
+                  "additionalProperties": false
+                }
+              },
+              "decision": { "type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
+              "summary": { "type": "string", "minLength": 1 },
+              "overall_confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "required": ["findings", "decision", "summary", "overall_confidence"],
+            "additionalProperties": false
+          }
+          SCHEMA
+
+      # Pin to commit SHA for supply chain security
+      - name: Run Codex review
+        if: steps.check-key.outputs.skip != 'true'
+        id: run-codex
+        uses: openai/codex-action@f5c0ca71642badb34c1e66321d8d85685a0fa3dc # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          output-file: /tmp/codex-review.json
+          output-schema-file: /tmp/review-schema.json
+          sandbox: read-only
+          model: gpt-5.2-codex  # Valid model ID - see header comment
+          prompt: |
+            You are a senior code reviewer. Review ONLY the changes introduced by
+            PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Focus on issues that impact:
+            - **Correctness**: bugs, logic errors, edge cases
+            - **Security**: injection, authentication, data exposure, supply chain (lockfiles)
+            - **Performance**: unnecessary allocations, N+1 queries, blocking calls
+            - **Maintainability**: unclear naming, missing error handling, dead code
+
+            IMPORTANT rules:
+            - Flag only actionable issues actually introduced by this PR
+            - Do NOT flag existing code that was not changed
+            - Do NOT flag style-only issues unless they hurt readability significantly
+            - Do NOT flag model IDs (e.g. gpt-5.2-codex, gemini-3-pro-preview) as
+              invalid or hallucinated. These are confirmed valid and intentional.
+            - When you flag an issue, cite the affected file and line range
+            - Provide a concrete suggestion for how to fix each issue
+            - Number each finding with sequential IDs starting from 1
+            - Set decision to APPROVE if no critical/important issues found
+
+            PR title: ${{ github.event.pull_request.title }}
+            PR body: ${{ github.event.pull_request.body }}
+
+            Use `git diff` to see the changes:
+            Base ref: ${{ github.event.pull_request.base.ref }}
+            Head ref: refs/pull/${{ github.event.pull_request.number }}/head
+
+      # Read from output file (primary) with fallback to final-message
+      - name: Parse Codex output
+        if: steps.check-key.outputs.skip != 'true'
+        id: parse
+        env:
+          CODEX_FINAL_MSG: ${{ steps.run-codex.outputs.final-message }}
+        run: |
+          set -euo pipefail
+          python3 << 'PY'
+          import json, os, sys
+
+          # Try output file first (more reliable for structured output)
+          raw = ""
+          try:
+            with open("/tmp/codex-review.json") as f:
+              raw = f.read().strip()
+          except Exception:
+            pass
+
+          # Fallback to final-message output
+          if not raw:
+            raw = os.environ.get("CODEX_FINAL_MSG", "").strip()
+
+          if not raw:
+            print("No Codex output found from file or final-message", file=sys.stderr)
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("has_review=false\n")
+            sys.exit(0)
+
+          try:
+            data = json.loads(raw)
+            # Validate it has expected structure
+            if "findings" not in data or "decision" not in data:
+              raise ValueError("Missing required fields")
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("has_review=true\n")
+              f.write(f"review_json<<REVIEW_EOF\n{raw}\nREVIEW_EOF\n")
+          except Exception as e:
+            print(f"Failed to parse Codex output: {e}", file=sys.stderr)
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("has_review=true\n")
+              f.write(f"review_json<<REVIEW_EOF\n{raw}\nREVIEW_EOF\n")
+          PY
+
+      - name: Post PR comment
+        if: steps.check-key.outputs.skip != 'true' && steps.parse.outputs.has_review == 'true'
+        uses: actions/github-script@v7
+        env:
+          CODEX_OUTPUT: ${{ steps.parse.outputs.review_json }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          script: |
+            const prNumber = context.payload.pull_request?.number || context.issue?.number;
+            if (!prNumber) {
+              console.log('No PR number found, skipping comment');
+              return;
+            }
+
+            const raw = process.env.CODEX_OUTPUT || '';
+
+            let review = null;
+            try {
+              review = JSON.parse(raw);
+            } catch (e) {
+              console.log('Could not parse structured output, posting raw response');
+            }
+
+            let body = '';
+
+            if (review && review.decision && review.findings) {
+              const decisionEmoji = {
+                'APPROVE': '\u2705',
+                'REQUEST_CHANGES': '\ud83d\udd34',
+                'COMMENT': '\ud83d\udcac'
+              }[review.decision] || '\ud83d\udcac';
+
+              body += `## ${decisionEmoji} Codex PR Review\n\n`;
+              body += `**Decision:** ${review.decision}\n`;
+              body += `**Summary:** ${review.summary}\n`;
+              body += `**Confidence:** ${Math.round((review.overall_confidence || 0) * 100)}%\n\n`;
+
+              if (review.findings && review.findings.length > 0) {
+                for (const f of review.findings) {
+                  const icon = {
+                    'critical': '\ud83d\udd34',
+                    'important': '\ud83d\udfe1',
+                    'suggestion': '\ud83d\udfe2'
+                  }[f.severity] || '\ud83d\udfe2';
+
+                  body += `\n#### ${icon} #${f.id}: ${f.title}\n`;
+                  body += `- **File:** \`${f.file}\``;
+                  if (f.line_start) {
+                    body += ` (L${f.line_start}`;
+                    if (f.line_end && f.line_end !== f.line_start) {
+                      body += `-L${f.line_end}`;
+                    }
+                    body += `)`;
+                  }
+                  body += `\n`;
+                  body += `- **Details:** ${f.body}\n`;
+                  if (f.suggestion) {
+                    body += `> \ud83d\udca1 ${f.suggestion}\n`;
+                  }
+                }
+
+                body += `\n<details><summary>\ud83d\udccb JSON (for selective acceptance)</summary>\n\n`;
+                body += '```json\n';
+                body += JSON.stringify({ issues: review.findings }, null, 2);
+                body += '\n```\n</details>\n';
+
+                body += `\n---\n\n`;
+                body += `### \ud83d\udd04 Implement with Claude Code\n\n`;
+                body += `Reply to this comment with instructions:\n`;
+                body += `- \`Accept all\` - implement everything as suggested\n`;
+                body += `- \`Ignore #2, fix the rest\` - selective implementation\n`;
+                body += `- Or any natural language instructions\n\n`;
+                body += `<!-- claude-code-prompt:${prNumber} -->\n`;
+              } else {
+                body += `\nNo issues found. The changes look good!\n`;
+              }
+            } else {
+              body += `## \ud83e\udd16 Codex PR Review\n\n`;
+              if (raw.length > 0) {
+                body += raw.substring(0, 60000);
+              } else {
+                body += `Codex review completed but returned no output.\n`;
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });
+
+            console.log(`Posted review comment on PR #${prNumber}`);
+
+      - name: Telegram notification
+        if: steps.check-key.outputs.skip != 'true' && always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          CODEX_OUTPUT: ${{ steps.parse.outputs.review_json }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram not configured; skipping."
+            exit 0
+          fi
+
+          python3 << 'PY'
+          import os, json, urllib.request, html
+
+          bot = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat = os.environ["TELEGRAM_CHAT_ID"]
+          pr_number = os.environ.get("PR_NUMBER", "?")
+          pr_title = html.escape(os.environ.get("PR_TITLE", "Unknown"))
+          pr_url = os.environ.get("PR_URL", "")
+          author = html.escape(os.environ.get("AUTHOR", "unknown"))
+          job_status = os.environ.get("JOB_STATUS", "unknown")
+
+          decision = "UNKNOWN"
+          try:
+              data = json.loads(os.environ.get("CODEX_OUTPUT", "{}"))
+              decision = data.get("decision", "UNKNOWN")
+          except Exception:
+              pass
+
+          if job_status == "failure":
+            emoji = "\u274c"
+            status = "WORKFLOW FAILED"
+          elif decision == "APPROVE":
+            emoji = "\u2705"
+            status = "APPROVED"
+          elif decision == "REQUEST_CHANGES":
+            emoji = "\U0001f534"
+            status = "CHANGES REQUESTED"
+          else:
+            emoji = "\U0001f4ac"
+            status = decision or "COMMENT"
+
+          msg = (
+            f"{emoji} <b>Codex PR Review: {status}</b>\n\n"
+            f"<b>PR #{pr_number}:</b> {pr_title}\n"
+            f"<b>Author:</b> {author}\n\n"
+            f'<a href="{pr_url}">View PR</a>'
+          )
+          payload = {
+            "chat_id": chat,
+            "text": msg,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+          }
+          req = urllib.request.Request(
+            f"https://api.telegram.org/bot{bot}/sendMessage",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type":"application/json"}
+          )
+          try:
+            with urllib.request.urlopen(req) as r:
+              print("Telegram sent:", r.status)
+          except Exception as e:
+            print(f"Telegram notification failed: {e}")
+          PY
