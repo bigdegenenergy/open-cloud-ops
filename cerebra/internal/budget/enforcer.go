@@ -131,7 +131,9 @@ func (e *Enforcer) SetBudget(scope BudgetScope, entityID string, limitUSD float6
 	defer cancel()
 
 	limitKey := fmt.Sprintf("budget:%s:%s:limit", scope, entityID)
-	return e.rdb.Set(ctx, limitKey, limitUSD, 30*24*time.Hour).Err()
+	// No TTL on limit keys — they persist until explicitly changed or deleted.
+	// (Spend keys have TTL for auto-reset; limits are managed via the API.)
+	return e.rdb.Set(ctx, limitKey, limitUSD, 0).Err()
 }
 
 // GetSpent returns the current spend for an entity from Redis.

@@ -150,21 +150,34 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	}
 	defer resp.Body.Close()
 
-	// 5. Read the response body (with size limit to prevent OOM).
+	// 5. Check if the response is a streaming response (SSE).
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "text/event-stream") {
+		h.streamResponse(c, resp, reqID, provider, model, agentID, teamID, orgID, start)
+		return
+	}
+
+	// 6. Read the response body (with size limit to prevent OOM).
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
 		return
 	}
 
+	// Check if response was truncated by the size limit.
+	if int64(len(respBody)) >= maxResponseBodySize {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream response too large"})
+		return
+	}
+
 	latency := time.Since(start).Milliseconds()
 
-	// 6. Extract token usage and calculate cost.
+	// 7. Extract token usage and calculate cost.
 	inputTokens, outputTokens := extractTokenUsage(respBody, provider)
 	totalTokens := inputTokens + outputTokens
 	costUSD := h.calculateCost(c.Request.Context(), string(provider), model, inputTokens, outputTokens)
 
-	// 7. Record the request in the database (if available).
+	// 8. Record the request in the database (if available).
 	apiReq := &models.APIRequest{
 		ID:           reqID,
 		Provider:     models.LLMProvider(provider),
@@ -194,7 +207,7 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 		}
 	}()
 
-	// 8. Return the response to the client.
+	// 9. Return the response to the client.
 	for key, vals := range resp.Header {
 		for _, v := range vals {
 			c.Header(key, v)
@@ -204,6 +217,52 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	c.Header("X-Cost-USD", fmt.Sprintf("%.6f", costUSD))
 	c.Header("X-Latency-Ms", fmt.Sprintf("%d", latency))
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+}
+
+// streamResponse streams SSE responses directly to the client without buffering.
+func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID string, provider Provider, model, agentID, teamID, orgID string, start time.Time) {
+	// Forward response headers.
+	for key, vals := range resp.Header {
+		for _, v := range vals {
+			c.Header(key, v)
+		}
+	}
+	c.Header("X-Request-ID", reqID)
+	c.Status(resp.StatusCode)
+
+	// Stream data to client.
+	c.Stream(func(w io.Writer) bool {
+		buf := make([]byte, 4096)
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+		}
+		return err == nil
+	})
+
+	latency := time.Since(start).Milliseconds()
+
+	// Record the streaming request (token counts unavailable for streamed responses).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		apiReq := &models.APIRequest{
+			ID:         reqID,
+			Provider:   models.LLMProvider(provider),
+			Model:      model,
+			AgentID:    agentID,
+			TeamID:     teamID,
+			OrgID:      orgID,
+			LatencyMs:  latency,
+			StatusCode: resp.StatusCode,
+			Timestamp:  time.Now(),
+		}
+		if h.db != nil {
+			if err := h.db.InsertRequest(ctx, apiReq); err != nil {
+				log.Printf("[%s] failed to record streaming request: %v", reqID, err)
+			}
+		}
+	}()
 }
 
 // setProviderAuth sets the appropriate authentication header for each provider.

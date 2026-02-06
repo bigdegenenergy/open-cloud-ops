@@ -53,11 +53,10 @@ jobs:
         id: check-perms
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
-          AUTHOR="${{ github.event.pull_request.user.login }}"
-          REPO="${{ github.repository }}"
 
           PERMISSION=$(gh api repos/"$REPO"/collaborators/"$AUTHOR"/permission --jq '.permission' 2>/dev/null || echo "none")
 
@@ -119,11 +118,10 @@ jobs:
         id: ctx
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
           mkdir -p /tmp/pr
 
           excludes=(":!*.svg" ":!*.png" ":!*.jpg" ":!*.min.js" ":!*.map" ":!*.woff" ":!*.woff2")
@@ -349,10 +347,13 @@ jobs:
 
       - name: Pre-fetch refs
         if: steps.check-key.outputs.skip != 'true'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           git fetch --no-tags origin \
-            ${{ github.event.pull_request.base.ref }} \
-            +refs/pull/${{ github.event.pull_request.number }}/head
+            "$BASE_REF" \
+            "+refs/pull/${PR_NUMBER}/head"
 
       - name: Prepare output schema
         if: steps.check-key.outputs.skip != 'true'
@@ -615,18 +616,20 @@ jobs:
           steps.combine.outputs.has_feedback == 'true' &&
           github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin ${{ github.event.pull_request.head.ref }}
-          git checkout -B ${{ github.event.pull_request.head.ref }} origin/${{ github.event.pull_request.head.ref }}
+          git fetch origin "$HEAD_REF"
+          git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
 
           cp /tmp/REVIEW_INSTRUCTIONS.md .
           git add -f REVIEW_INSTRUCTIONS.md
           git commit -m "chore: add combined review instructions [skip ci]"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          git push origin "HEAD:$HEAD_REF"
 
       - name: Cleanup stale instructions
         if: |
@@ -634,17 +637,19 @@ jobs:
           steps.combine.outputs.decision == 'APPROVE' &&
           github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          git fetch origin ${{ github.event.pull_request.head.ref }}
-          git checkout -B ${{ github.event.pull_request.head.ref }} origin/${{ github.event.pull_request.head.ref }}
+          git fetch origin "$HEAD_REF"
+          git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
 
           if [ -f "REVIEW_INSTRUCTIONS.md" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git rm REVIEW_INSTRUCTIONS.md
             git commit -m "chore: remove review instructions after approval [skip ci]"
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+            git push origin "HEAD:$HEAD_REF"
           fi
 
       - name: Telegram notification

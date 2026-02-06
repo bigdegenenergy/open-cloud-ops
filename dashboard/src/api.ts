@@ -1,7 +1,7 @@
 // Cerebra API client for the Open Cloud Ops dashboard.
 // All endpoints are proxied through Vite dev server to localhost:8080.
 
-const BASE = '';
+const BASE = "";
 
 export interface CostSummaryItem {
   dimension: string;
@@ -41,7 +41,7 @@ export interface CreateBudgetPayload {
 
 export interface Insight {
   id: string;
-  severity: 'info' | 'warning' | 'critical';
+  severity: "info" | "warning" | "critical";
   category: string;
   title: string;
   description: string;
@@ -66,22 +66,23 @@ export interface HealthStatus {
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${url}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(30_000),
     ...options,
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => 'Unknown error');
+    const text = await res.text().catch(() => "Unknown error");
     throw new Error(`API ${res.status}: ${text}`);
   }
   return res.json() as Promise<T>;
 }
 
 export function getHealth(): Promise<HealthStatus> {
-  return request<HealthStatus>('/health');
+  return request<HealthStatus>("/health");
 }
 
 export function getCostSummary(
-  dimension: 'model' | 'provider' | 'team',
+  dimension: "model" | "provider" | "team",
   from: string,
   to: string,
 ): Promise<CostSummaryItem[]> {
@@ -94,7 +95,7 @@ export function getRecentRequests(limit = 50): Promise<CostRequest[]> {
 }
 
 export function getBudgets(): Promise<Budget[]> {
-  return request<Budget[]>('/api/v1/budgets');
+  return request<Budget[]>("/api/v1/budgets");
 }
 
 export function getBudget(scope: string, entityId: string): Promise<Budget> {
@@ -102,16 +103,16 @@ export function getBudget(scope: string, entityId: string): Promise<Budget> {
 }
 
 export function createBudget(payload: CreateBudgetPayload): Promise<Budget> {
-  return request<Budget>('/api/v1/budgets', {
-    method: 'POST',
+  return request<Budget>("/api/v1/budgets", {
+    method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
 export function getInsights(): Promise<Insight[]> {
-  return request<Insight[]>('/api/v1/insights');
+  return request<Insight[]>("/api/v1/insights");
 }
 
 export function getReport(): Promise<ReportSummary> {
-  return request<ReportSummary>('/api/v1/report');
+  return request<ReportSummary>("/api/v1/report");
 }

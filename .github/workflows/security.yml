@@ -212,8 +212,9 @@ jobs:
           fi
 
           echo "👤 Checking for full names..."
-          NAME_CONTEXT='(name|author|user|contact|owner|created[_ ]?by|assigned[_ ]?to|submitted[_ ]?by)\s*[:=]?\s*'
-          NAME_PATTERN="[A-Z][a-z]+\s+[A-Z][a-z]+"
+          # Simplified pattern to avoid ReDoS: match "key: First Last" with possessive-safe alternation
+          NAME_CONTEXT='(name|author|user|contact|owner|created_by|assigned_to|submitted_by)[[:space:]]*[:=][[:space:]]*'
+          NAME_PATTERN="[A-Z][a-z]{1,20} [A-Z][a-z]{1,20}"
           NAME_EXCLUDES='Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name'
           NAME_FOUND=$(echo "$FILES" | xargs grep -lE "${NAME_CONTEXT}${NAME_PATTERN}" 2>/dev/null | while read -r file; do
             if grep -E "${NAME_CONTEXT}${NAME_PATTERN}" "$file" 2>/dev/null | grep -vE "$NAME_EXCLUDES" | grep -qE "${NAME_CONTEXT}${NAME_PATTERN}"; then

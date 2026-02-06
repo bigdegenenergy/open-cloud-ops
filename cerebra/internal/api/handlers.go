@@ -2,6 +2,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -184,8 +185,11 @@ func (h *Handlers) GetBudget(c *gin.Context) {
 	}
 
 	// Enrich with real-time spend from Redis.
-	spent, _ := h.enforcer.GetSpent(budget.BudgetScope(scope), entityID)
-	if spent > 0 {
+	spent, err := h.enforcer.GetSpent(budget.BudgetScope(scope), entityID)
+	if err != nil {
+		log.Printf("failed to get spend from Redis for %s/%s: %v", scope, entityID, err)
+		// Fall through with DB-stored spend value.
+	} else if spent > 0 {
 		b.SpentUSD = spent
 	}
 
