@@ -95,13 +95,14 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	reqID := uuid.New().String()
 
 	// 1. Read the request body (with size limit to prevent OOM).
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, h.maxRequestBodySize))
+	// Read limit+1 bytes so we can distinguish "exactly at limit" from "over limit".
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, h.maxRequestBodySize+1))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 		return
 	}
 	defer c.Request.Body.Close()
-	if int64(len(body)) >= h.maxRequestBodySize {
+	if int64(len(body)) > h.maxRequestBodySize {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
 		return
 	}
@@ -175,15 +176,16 @@ func (h *ProxyHandler) proxyRequest(c *gin.Context, provider Provider) {
 	}
 
 	// 6. Read the response body (with size limit to prevent OOM).
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodySize))
+	// Read limit+1 to distinguish "exactly at limit" from "over limit".
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodySize+1))
 	if err != nil {
 		releaseReservation()
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read upstream response"})
 		return
 	}
 
-	// Check if response was truncated by the size limit.
-	if int64(len(respBody)) >= h.maxResponseBodySize {
+	// Check if response exceeded the size limit.
+	if int64(len(respBody)) > h.maxResponseBodySize {
 		releaseReservation()
 		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream response too large"})
 		return
