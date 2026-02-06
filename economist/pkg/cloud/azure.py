@@ -44,7 +44,7 @@ class AzureProvider(CloudProvider):
             self._credential = ClientSecretCredential(
                 tenant_id=self._settings.azure_tenant_id,
                 client_id=self._settings.azure_client_id,
-                client_secret=self._settings.azure_client_secret,
+                client_secret=self._settings.azure_client_secret.get_secret_value(),
             )
             self._cost_client = CostManagementClient(
                 credential=self._credential,
@@ -76,9 +76,7 @@ class AzureProvider(CloudProvider):
         try:
             self._ensure_clients()
 
-            scope = (
-                f"/subscriptions/{self._settings.azure_subscription_id}"
-            )
+            scope = f"/subscriptions/{self._settings.azure_subscription_id}"
 
             # Build the query for cost data
             from azure.mgmt.costmanagement.models import (
@@ -101,17 +99,11 @@ class AzureProvider(CloudProvider):
                 dataset=QueryDataset(
                     granularity="Daily",
                     aggregation={
-                        "totalCost": QueryAggregation(
-                            name="Cost", function="Sum"
-                        ),
+                        "totalCost": QueryAggregation(name="Cost", function="Sum"),
                     },
                     grouping=[
-                        QueryGrouping(
-                            type="Dimension", name="ServiceName"
-                        ),
-                        QueryGrouping(
-                            type="Dimension", name="ResourceLocation"
-                        ),
+                        QueryGrouping(type="Dimension", name="ServiceName"),
+                        QueryGrouping(type="Dimension", name="ResourceLocation"),
                     ],
                 ),
             )
@@ -214,12 +206,18 @@ class AzureProvider(CloudProvider):
                 recommendations.append(
                     {
                         "provider": "azure",
-                        "resource_id": rec.resource_metadata.resource_id
-                        if rec.resource_metadata
-                        else "unknown",
+                        "resource_id": (
+                            rec.resource_metadata.resource_id
+                            if rec.resource_metadata
+                            else "unknown"
+                        ),
                         "resource_type": rec.impacted_field or "unknown",
                         "recommendation_type": self._map_azure_rec_type(rec.category),
-                        "title": rec.short_description.problem if rec.short_description else "Azure recommendation",
+                        "title": (
+                            rec.short_description.problem
+                            if rec.short_description
+                            else "Azure recommendation"
+                        ),
                         "description": (
                             rec.short_description.solution
                             if rec.short_description

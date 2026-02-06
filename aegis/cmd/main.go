@@ -20,10 +20,11 @@ import (
 	"github.com/bigdegenenergy/open-cloud-ops/aegis/internal/health"
 	"github.com/bigdegenenergy/open-cloud-ops/aegis/internal/policy"
 	"github.com/bigdegenenergy/open-cloud-ops/aegis/internal/recovery"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/bigdegenenergy/open-cloud-ops/aegis/pkg/config"
 	"github.com/bigdegenenergy/open-cloud-ops/aegis/pkg/models"
 	"github.com/gin-gonic/gin"
-
 	// Conceptual imports for production Kubernetes integration.
 	// These would be uncommented when building with actual k8s dependencies:
 	// "k8s.io/client-go/kubernetes"
@@ -49,14 +50,16 @@ func main() {
 	log.Printf("Configuration loaded: port=%s, log_level=%s, storage=%s, retention=%d days",
 		cfg.Port, cfg.LogLevel, cfg.BackupStoragePath, cfg.DefaultRetentionDays)
 
-	// Initialize database connection (pgx)
-	// In production, this would establish a connection pool:
-	//   pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
-	//   if err != nil {
-	//       log.Fatalf("Failed to connect to database: %v", err)
-	//   }
-	//   defer pool.Close()
-	log.Printf("Database URL configured: %s", maskDSN(cfg.DatabaseURL))
+	// Initialize database connection pool
+	var dbPool *pgxpool.Pool
+	pool, poolErr := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	if poolErr != nil {
+		log.Printf("WARNING: Failed to connect to database: %v (running without persistence)", poolErr)
+	} else {
+		dbPool = pool
+		defer dbPool.Close()
+		log.Printf("Database connected: %s", maskDSN(cfg.DatabaseURL))
+	}
 
 	// Initialize Redis connection
 	// In production:
@@ -88,6 +91,16 @@ func main() {
 
 	// Initialize managers
 	backupManager := backup.NewBackupManager(kubeClient, storage, cfg.BackupStoragePath, cfg.DefaultRetentionDays)
+
+	// Attach persistent store if database is available
+	if dbPool != nil {
+		store := backup.NewPgStore(dbPool)
+		backupManager.SetStore(store)
+		if err := backupManager.LoadFromStore(context.Background()); err != nil {
+			log.Printf("WARNING: Failed to load backup state from database: %v", err)
+		}
+	}
+
 	recoveryManager := recovery.NewRecoveryManager(kubeClient, backupManager, storage)
 	policyEngine := policy.NewPolicyEngine(backupManager)
 	healthChecker := health.NewHealthChecker(kubeClient)

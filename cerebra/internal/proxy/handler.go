@@ -506,12 +506,26 @@ func (h *ProxyHandler) DroppedLogCount() int64 {
 	return h.droppedLogs.Load()
 }
 
+// maxSpillBytes is the maximum size (100MB) for the log spill file before rotation.
+const maxSpillBytes = 100 * 1024 * 1024
+
 // spillToDisk writes a log entry to a local JSONL file when the in-memory
 // channel is full. This prevents permanent loss of financial/usage data.
-// The spill file can be replayed into the database during off-peak hours.
+// The spill file is capped at maxSpillBytes and rotated to prevent disk exhaustion.
 func (h *ProxyHandler) spillToDisk(req models.APIRequest) {
 	h.spillMu.Lock()
 	defer h.spillMu.Unlock()
+
+	// Rotate the spill file if it exceeds the size cap
+	if h.spillFile != nil {
+		if fi, err := h.spillFile.Stat(); err == nil && fi.Size() >= maxSpillBytes {
+			h.spillFile.Close()
+			os.Remove("cerebra-log-spill.jsonl.1")
+			os.Rename("cerebra-log-spill.jsonl", "cerebra-log-spill.jsonl.1")
+			h.spillFile = nil
+			log.Printf("proxy: rotated spill file (exceeded %d bytes)", maxSpillBytes)
+		}
+	}
 
 	if h.spillFile == nil {
 		f, err := os.OpenFile("cerebra-log-spill.jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)

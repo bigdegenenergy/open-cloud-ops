@@ -76,15 +76,11 @@ class AWSProvider(CloudProvider):
                         cost_amount = float(
                             metrics.get("UnblendedCost", {}).get("Amount", 0)
                         )
-                        cost_unit = metrics.get("UnblendedCost", {}).get(
-                            "Unit", "USD"
-                        )
+                        cost_unit = metrics.get("UnblendedCost", {}).get("Unit", "USD")
                         usage_qty = float(
                             metrics.get("UsageQuantity", {}).get("Amount", 0)
                         )
-                        usage_unit = metrics.get("UsageQuantity", {}).get(
-                            "Unit", ""
-                        )
+                        usage_unit = metrics.get("UsageQuantity", {}).get("Unit", "")
 
                         results.append(
                             {
@@ -145,8 +141,10 @@ class AWSProvider(CloudProvider):
         }
         if self._settings.aws_access_key_id:
             kwargs["aws_access_key_id"] = self._settings.aws_access_key_id
-        if self._settings.aws_secret_access_key:
-            kwargs["aws_secret_access_key"] = self._settings.aws_secret_access_key
+        if self._settings.aws_secret_access_key.get_secret_value():
+            kwargs["aws_secret_access_key"] = (
+                self._settings.aws_secret_access_key.get_secret_value()
+            )
         return boto3.Session(**kwargs)
 
     def _get_account_id(self) -> str:
@@ -167,10 +165,7 @@ class AWSProvider(CloudProvider):
             for page in paginator.paginate():
                 for reservation in page.get("Reservations", []):
                     for instance in reservation.get("Instances", []):
-                        tags = {
-                            t["Key"]: t["Value"]
-                            for t in instance.get("Tags", [])
-                        }
+                        tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
                         resources.append(
                             {
                                 "resource_id": instance["InstanceId"],
@@ -209,8 +204,7 @@ class AWSProvider(CloudProvider):
                             "region": self._settings.aws_region,
                             "provider": "aws",
                             "tags": {
-                                t["Key"]: t["Value"]
-                                for t in db.get("TagList", [])
+                                t["Key"]: t["Value"] for t in db.get("TagList", [])
                             },
                             "instance_type": db.get("DBInstanceClass"),
                             "engine": db.get("Engine"),
@@ -265,8 +259,9 @@ class AWSProvider(CloudProvider):
 
             recs: list[dict[str, Any]] = []
             for detail in (
-                response.get("Recommendations", [{}])[0]
-                .get("RecommendationDetails", [])
+                response.get("Recommendations", [{}])[0].get(
+                    "RecommendationDetails", []
+                )
                 if response.get("Recommendations")
                 else []
             ):

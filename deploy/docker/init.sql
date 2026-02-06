@@ -175,33 +175,33 @@ CREATE TABLE IF NOT EXISTS policy_violations (
 -- Aegis (Resilience Engine) Tables
 -- =============================================================================
 
--- Backup job definitions
+-- Backup job definitions (columns aligned with Go models.BackupJob)
 CREATE TABLE IF NOT EXISTS backup_jobs (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name            VARCHAR(255) NOT NULL,
-    description     TEXT,
-    target_type     VARCHAR(100) NOT NULL,
-    target_config   JSONB NOT NULL,
-    schedule_cron   VARCHAR(100) NOT NULL,
-    retention_days  INT DEFAULT 30,
-    is_active       BOOLEAN DEFAULT TRUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                VARCHAR(64) PRIMARY KEY,
+    name              VARCHAR(255) NOT NULL,
+    namespace         VARCHAR(255) NOT NULL,
+    resource_types    TEXT[] NOT NULL DEFAULT '{}',
+    schedule          VARCHAR(100) NOT NULL,
+    retention_days    INT DEFAULT 30,
+    storage_location  VARCHAR(512) DEFAULT '',
+    status            VARCHAR(50) DEFAULT 'active',
+    last_run          TIMESTAMPTZ,
+    next_run          TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Individual backup execution records
+-- Individual backup execution records (columns aligned with Go models.BackupRecord)
 CREATE TABLE IF NOT EXISTS backup_records (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    job_id          UUID NOT NULL REFERENCES backup_jobs(id) ON DELETE CASCADE,
+    id              VARCHAR(64) PRIMARY KEY,
+    job_id          VARCHAR(64) NOT NULL REFERENCES backup_jobs(id) ON DELETE CASCADE,
     status          VARCHAR(50) NOT NULL DEFAULT 'pending',
-    started_at      TIMESTAMPTZ,
-    completed_at    TIMESTAMPTZ,
-    size_bytes      BIGINT,
-    storage_location VARCHAR(512),
-    checksum        VARCHAR(256),
-    error_message   TEXT,
-    metadata        JSONB DEFAULT '{}',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    size_bytes      BIGINT DEFAULT 0,
+    duration_ms     BIGINT DEFAULT 0,
+    resource_count  INT DEFAULT 0,
+    storage_path    VARCHAR(512) DEFAULT '',
+    error_message   TEXT DEFAULT '',
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ
 );
 
 -- Disaster recovery plans
@@ -305,8 +305,8 @@ CREATE INDEX IF NOT EXISTS idx_policy_violations_status ON policy_violations (st
 CREATE INDEX IF NOT EXISTS idx_policy_violations_policy ON policy_violations (policy_id);
 
 -- Aegis indexes
-CREATE INDEX IF NOT EXISTS idx_backup_records_job ON backup_records (job_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_backup_records_status ON backup_records (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backup_records_job ON backup_records (job_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backup_records_status ON backup_records (status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_recovery_executions_plan ON recovery_executions (plan_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_health_checks_target ON health_checks (target_name, checked_at DESC);
 CREATE INDEX IF NOT EXISTS idx_health_checks_status ON health_checks (status, checked_at DESC);

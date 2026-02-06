@@ -43,6 +43,7 @@ type KubeClient interface {
 type BackupManager struct {
 	kubeClient    KubeClient
 	storage       StorageBackend
+	store         BackupStore // Optional DB persistence (write-through cache)
 	storagePath   string
 	retentionDays int
 	encryptionKey []byte // Optional AES-256 key for encrypting archives at rest
@@ -79,9 +80,52 @@ func NewBackupManager(kubeClient KubeClient, storage StorageBackend, storagePath
 	return m
 }
 
+// SetStore configures a persistent BackupStore for write-through caching.
+// When set, all mutations are persisted to the store in addition to memory.
+func (m *BackupManager) SetStore(store BackupStore) {
+	m.store = store
+}
+
+// LoadFromStore populates the in-memory cache from the persistent store.
+// Call this on startup after SetStore to recover state from a previous run.
+func (m *BackupManager) LoadFromStore(ctx context.Context) error {
+	if m.store == nil {
+		return nil
+	}
+
+	jobs, err := m.store.ListJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("backup: failed to load jobs from store: %w", err)
+	}
+
+	allRecords, err := m.store.ListAllRecords(ctx)
+	if err != nil {
+		return fmt.Errorf("backup: failed to load records from store: %w", err)
+	}
+
+	// Group records by job ID
+	recordsByJob := make(map[string][]*models.BackupRecord)
+	for _, r := range allRecords {
+		recordsByJob[r.JobID] = append(recordsByJob[r.JobID], r)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, job := range jobs {
+		m.jobs[job.ID] = job
+		m.records[job.ID] = recordsByJob[job.ID]
+		if m.records[job.ID] == nil {
+			m.records[job.ID] = make([]*models.BackupRecord, 0)
+		}
+	}
+
+	log.Printf("backup: loaded %d jobs and %d records from store", len(jobs), len(allRecords))
+	return nil
+}
+
 // CreateJob registers a new backup job. It validates the job configuration,
-// assigns an ID and timestamps, and stores the job in memory.
-// In production, this would also persist to PostgreSQL.
+// assigns an ID and timestamps, and persists to both memory and the store.
 func (m *BackupManager) CreateJob(ctx context.Context, job models.BackupJob) (*models.BackupJob, error) {
 	if job.Name == "" {
 		return nil, fmt.Errorf("backup: job name is required")
@@ -117,10 +161,13 @@ func (m *BackupManager) CreateJob(ctx context.Context, job models.BackupJob) (*m
 	job.NextRun = &nextRun
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.jobs[job.ID] = &job
 	m.records[job.ID] = make([]*models.BackupRecord, 0)
+	m.mu.Unlock()
+
+	if m.store != nil {
+		logStoreErr("SaveJob", m.store.SaveJob(ctx, &job))
+	}
 
 	log.Printf("backup: created job %s (%s) for namespace %s", job.ID, job.Name, job.Namespace)
 	return &job, nil
@@ -176,6 +223,10 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 	m.mu.Lock()
 	m.records[jobID] = append(m.records[jobID], record)
 	m.mu.Unlock()
+
+	if m.store != nil {
+		logStoreErr("SaveRecord(initial)", m.store.SaveRecord(ctx, record))
+	}
 
 	log.Printf("backup: starting backup execution %s for job %s (%s)", record.ID, jobID, jobCopy.Name)
 
@@ -291,8 +342,17 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 		j.LastRun = &completedAt
 		nextRun := calculateNextRun(j.Schedule, completedAt)
 		j.NextRun = &nextRun
+		if m.store != nil {
+			jCopy := *j
+			go func() { logStoreErr("SaveJob(lastRun)", m.store.SaveJob(ctx, &jCopy)) }()
+		}
 	}
 	m.mu.Unlock()
+
+	// Persist the completed record
+	if m.store != nil {
+		logStoreErr("SaveRecord(completed)", m.store.SaveRecord(ctx, record))
+	}
 
 	log.Printf("backup: completed backup %s: %d resources, %d bytes, %dms",
 		record.ID, record.ResourceCount, record.SizeBytes, record.DurationMs)
@@ -359,6 +419,9 @@ func (m *BackupManager) DeleteBackup(ctx context.Context, recordID string) error
 
 				// Remove from records
 				m.records[jobID] = append(records[:i], records[i+1:]...)
+				if m.store != nil {
+					logStoreErr("DeleteRecord", m.store.DeleteRecord(ctx, recordID))
+				}
 				log.Printf("backup: deleted backup record %s", recordID)
 				return nil
 			}

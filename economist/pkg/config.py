@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -22,7 +23,7 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_db: str = "opencloudops"
     postgres_user: str = "oco_user"
-    postgres_password: str = "change_me"
+    postgres_password: SecretStr = SecretStr("change_me")
 
     # -------------------------------------------------------------------
     # Redis
@@ -40,7 +41,7 @@ class Settings(BaseSettings):
     # AWS
     # -------------------------------------------------------------------
     aws_access_key_id: str = ""
-    aws_secret_access_key: str = ""
+    aws_secret_access_key: SecretStr = SecretStr("")
     aws_region: str = "us-east-1"
 
     # -------------------------------------------------------------------
@@ -49,13 +50,13 @@ class Settings(BaseSettings):
     azure_subscription_id: str = ""
     azure_tenant_id: str = ""
     azure_client_id: str = ""
-    azure_client_secret: str = ""
+    azure_client_secret: SecretStr = SecretStr("")
 
     # -------------------------------------------------------------------
     # GCP
     # -------------------------------------------------------------------
     gcp_project_id: str = ""
-    gcp_credentials_json: str = ""
+    gcp_credentials_json: SecretStr = SecretStr("")
 
     # -------------------------------------------------------------------
     # Derived helpers
@@ -64,7 +65,7 @@ class Settings(BaseSettings):
     def postgres_url(self) -> str:
         """Build a full PostgreSQL connection URL."""
         return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql://{self.postgres_user}:{self.postgres_password.get_secret_value()}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
@@ -72,7 +73,7 @@ class Settings(BaseSettings):
     def async_postgres_url(self) -> str:
         """Build an async PostgreSQL connection URL (asyncpg driver)."""
         return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password.get_secret_value()}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
