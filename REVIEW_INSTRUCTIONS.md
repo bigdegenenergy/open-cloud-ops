@@ -5,72 +5,72 @@
 ```json
 {
   "review": {
-    "summary": "This PR introduces a sophisticated AI-driven development environment and a new Go backend (Cerebra) with a React dashboard. While the architecture is ambitious, there are critical issues blocking merge. \n\nMost notably, the dashboard dependencies reference non-existent 'future' versions (e.g., Vite 7, TypeScript 5.9) which will cause build failures. There is also a critical command injection vulnerability in the notification workflow, hardcoded security downgrades (SSL disabled) in the backend, and logic errors in the Go router. The inclusion of temporary files and potential sandbox escapes in the auto-approval hooks also need addressing.",
+    "summary": "The PR contains critical issues that prevent merging. Most notably, the lockfiles reference hallucinated/future versions of dependencies (Vite 7, React 19.2) which will cause immediate build failures. Functionally, the Cerebra proxy contains a critical bypass where streaming requests (SSE) completely skip budget enforcement. Several security vulnerabilities exist regarding shell injection in CI workflows and accidental commits of temporary artifacts.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
     {
       "id": 1,
       "severity": "critical",
-      "file": ".github/workflows/notify-on-failure.yml",
-      "line": 15,
-      "title": "Command Injection via Branch Name",
-      "description": "The workflow interpolates `${{ github.event.workflow_run.head_branch }}` directly into a shell script within the `run` block. A malicious branch name containing shell metacharacters (e.g., `\"; env > secrets.txt; \"`) can execute arbitrary commands and exfiltrate secrets available to the runner.",
-      "suggestion": "Map the context value to an environment variable and use it safely in the shell. \n\nExample:\nenv:\n  HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}\nrun: |\n  ./.claude/hooks/notify.py ... --message \"... $HEAD_BRANCH\""
+      "file": "package-lock.json",
+      "line": 1,
+      "title": "Hallucinated Dependency Versions",
+      "description": "The lockfile references non-existent future versions of major packages (`vite@7.3.1`, `react@19.2.4`, `typescript@5.9.3`). These versions do not exist on public registries. This renders the project unbuildable and poses a security risk (Dependency Confusion) if these version numbers are claimed by attackers.",
+      "suggestion": "Delete `package-lock.json` and run `npm install` to generate a valid lockfile with actual, existing versions."
     },
     {
       "id": 2,
       "severity": "critical",
-      "file": "dashboard/package-lock.json",
-      "line": 1,
-      "title": "Invalid/Non-Existent Dependency Versions",
-      "description": "The lockfile references version numbers that do not currently exist on public registries (e.g., `vite` 7.3.1, `typescript` 5.9.3, `zod` 4.3.6). These appear to be hallucinated or 'future' versions. `npm install` will fail with 404 errors.",
-      "suggestion": "Regenerate `package-lock.json` using currently available stable versions (e.g., Vite 5/6, TypeScript 5.7)."
+      "file": "cerebra/internal/proxy/handler.go",
+      "line": 180,
+      "title": "Budget Enforcement Bypass via Streaming",
+      "description": "The `streamResponse` handler explicitly skips cost calculation and calls to `enforcer.RecordSpend`. This creates a loophole allowing users to bypass all budget limits by using streaming APIs (the primary mode for LLMs), rendering the budget enforcement feature ineffective.",
+      "suggestion": "Implement token counting for streams (e.g., by accumulating chunks or using an approximation) and ensure cost is recorded after the stream completes."
     },
     {
       "id": 3,
-      "severity": "important",
-      "file": "cerebra/internal/config/config.go",
+      "severity": "critical",
+      "file": ".github/workflows/combined-pr-review.yml",
       "line": 45,
-      "title": "Insecure Database Connection (SSL Disabled)",
-      "description": "The `DSN()` method explicitly hardcodes `sslmode=disable`. This forces unencrypted communication between the application and the database, which is unsafe for production environments.",
-      "suggestion": "Make SSL mode configurable via an environment variable (e.g., `DB_SSL_MODE`) and default to `require` or `verify-full` for production, allowing `disable` only for local development."
+      "title": "Shell Injection Vulnerability in Workflow",
+      "description": "The workflow interpolates user input directly into a shell command: `git fetch origin ${{ github.event.pull_request.head.ref }}`. A malicious branch name could execute arbitrary code in the runner context.",
+      "suggestion": "Map the untrusted input to an environment variable (e.g., `env: HEAD_REF: ${{ ... }}`) and use the environment variable in the run script (`git fetch origin \"$HEAD_REF\"`)."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": "cerebra/internal/router/router.go",
-      "line": 60,
-      "title": "Potential Nil Pointer Dereference in Router",
-      "description": "The `findModel` method returns `nil` if a model is not found. The `Route` method calls `findModel` but does not appear to consistently handle the `nil` return value before accessing fields on the struct, particularly in strategies other than `QualityFirst` (where a fallback is mentioned).",
-      "suggestion": "Ensure `model` is checked for `nil` immediately after `findModel` returns. Return a specific error or apply a default fallback model for all strategies if the requested model is invalid."
+      "file": "tools/onefilellm/tmp/tmp.EDsqM7tzY4/tools/onefilellm/README.md",
+      "line": 1,
+      "title": "Accidental Commit of Temporary Artifacts",
+      "description": "Temporary build artifacts and deeply nested temporary directories (`tmp/tmp.EDsqM7tzY4/...`) have been committed to the repository.",
+      "suggestion": "Remove the `tools/onefilellm/tmp` directory and update `.gitignore` to exclude `tmp/` directories."
     },
     {
       "id": 5,
       "severity": "important",
-      "file": ".claude/hooks/auto-approve.sh",
-      "line": 10,
-      "title": "Security Bypass via Combined Tool Use",
-      "description": "The hook auto-approves commands like `npm test` or `make`. An AI agent with `Edit` permissions could modify `package.json` scripts or the `Makefile` to include malicious code, then trigger `npm test` to execute it, effectively bypassing the shell command allowlist.",
-      "suggestion": "Remove auto-approval for command execution tools (`Bash`), or implement strict checksum verification of configuration files (`package.json`, `Makefile`) to ensure they haven't been modified by the agent in the current session."
+      "file": "cerebra/internal/budget/enforcer.go",
+      "line": 50,
+      "title": "Potential Double Counting of Spend",
+      "description": "The summary states `CheckBudget` uses a Lua script to 'check and increment' (reservation model). `RecordSpend` also appears to add to the spend. If both are called for the same request, costs will be double-counted.",
+      "suggestion": "Verify logic: If `CheckBudget` reserves funds, `RecordSpend` should be a settlement/adjustment operation, or `CheckBudget` should be read-only."
     },
     {
       "id": 6,
-      "severity": "suggestion",
-      "file": "tools/onefilellm/tmp/tmp.EDsqM7tzY4/tools/onefilellm/README.md",
-      "line": 1,
-      "title": "Committed Temporary Artifacts",
-      "description": "The file path `tools/onefilellm/tmp/tmp.EDsqM7tzY4/...` indicates that temporary generation artifacts were accidentally committed to the repository.",
-      "suggestion": "Remove the `tools/onefilellm/tmp/` directory and add it to `.gitignore`."
+      "severity": "important",
+      "file": "docs/ANTHROPIC-MODELS.md",
+      "line": 10,
+      "title": "Configuration References Non-Existent Models",
+      "description": "Configuration files and docs reference `claude-opus-4-5-20251101`. This model ID is invalid and will likely cause API errors if used.",
+      "suggestion": "Update configurations to use currently available model IDs."
     },
     {
       "id": 7,
-      "severity": "important",
-      "file": "cerebra/internal/api/handlers.go",
-      "line": 85,
-      "title": "Data Consistency Risk in CreateBudget",
-      "description": "The `CreateBudget` handler commits the budget to the database before updating the cache (`enforcer.SetBudget`). If the cache update fails, the API returns an error, but the record persists in the database, leading to inconsistent state.",
-      "suggestion": "Use a transaction to ensure atomicity, or ensure the cache update is performed/retried reliably. Consider not failing the request if the DB write succeeded, but log the cache failure (or invalidate the cache)."
+      "severity": "suggestion",
+      "file": "cerebra/internal/config/config.go",
+      "line": 45,
+      "title": "DSN Leaks Credentials",
+      "description": "The `DSN()` method returns the connection string with the password in cleartext. If this is logged by the application or an ORM, it will leak credentials.",
+      "suggestion": "Ensure this value is never logged, or provide a `RedactedDSN()` method for logging purposes."
     }
   ]
 }
