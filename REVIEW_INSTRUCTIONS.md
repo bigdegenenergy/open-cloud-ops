@@ -5,54 +5,63 @@
 ```json
 {
   "review": {
-    "summary": "The PR introduces the Cerebra MVP and a comprehensive AI agent configuration. While the feature set is extensive, there are critical issues regarding dependency integrity (hallucinated future versions in package-lock.json), security defaults (optional admin authentication), and potential correctness bugs in the proxy streaming logic. The extensive agent configuration also introduces security risks regarding arbitrary command execution and SSRF that need mitigation.",
+    "summary": "The PR implements a substantial portion of the Cerebra MVP and AI team structure. However, critical stability and security issues remain. Specifically, the Go proxy handler risks a nil-pointer panic for unknown models, the Python approval script contains invalid syntax preventing execution, and the agent auto-approval hook contains a security bypass allowing arbitrary code execution via build scripts. Additionally, the proxy endpoints appear to be unauthenticated, allowing any user with provider keys to utilize the gateway's storage and tracking resources.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
     {
       "id": 1,
       "severity": "critical",
-      "file": "dashboard/package.json",
-      "line": 0,
-      "title": "Non-existent/Hallucinated Dependency Versions",
-      "description": "The `package.json` and `package-lock.json` reference versions that do not currently exist on public registries (e.g., `react@19.2`, `vite@7.3`, `tailwind@4.1`). While the PR description suggests a '2026' context, merging this into a real repository today will break builds (`npm install` will fail).",
-      "suggestion": "Downgrade dependencies to currently stable or valid beta/rc versions (e.g., React 18.x or 19.0.0-rc, Vite 5.x/6.x)."
+      "file": "cerebra/internal/proxy/handler.go",
+      "line": 160,
+      "title": "Potential Panic: Nil pointer dereference in proxy handler",
+      "description": "The `targetModel` variable is assigned the result of `h.router.Route(...)`, which can return `nil` (e.g., if a model is unknown and the routing strategy yields no match). The code subsequently accesses `targetModel.InputPrice` without checking if `targetModel` is nil, which will cause the server to crash (panic) upon receiving a request for an unknown model.",
+      "suggestion": "Add a nil check for `targetModel` immediately after routing. If nil, return a 400 Bad Request error to the client or fall back to a safe default model."
     },
     {
       "id": 2,
-      "severity": "important",
-      "file": "cerebra/internal/config/config.go",
-      "line": 0,
-      "title": "Insecure Admin Auth Default",
-      "description": "If `CEREBRA_ADMIN_API_KEY` is not set, the configuration appears to default to empty, effectively disabling authentication for sensitive `/api/v1` management endpoints. Administrative interfaces should fail-secure (deny access) if authentication is not configured.",
-      "suggestion": "Modify `Load()` or the middleware to panic or block requests if `AdminAPIKey` is empty, or require the environment variable to be set for the server to start."
+      "severity": "critical",
+      "file": ".claude/commands/workflow-approve.md",
+      "line": 34,
+      "title": "Syntax Error: Invalid Python import in workflow command",
+      "description": "The command executes a Python one-liner that attempts `from .claude.hooks.workflow_engine ...`. In Python, relative imports (starting with `.`) are only valid within a package context, and directory names starting with `.` (like `.claude`) are not valid package identifiers. This command will fail with a `SyntaxError` or `ImportError` every time it is run.",
+      "suggestion": "Adjust the python path and import strategy. For example: `sys.path.append(os.getcwd()); from claude.hooks...` (assuming the directory is renamed or symlinked) or use `importlib` to load from a hidden directory."
     },
     {
       "id": 3,
-      "severity": "important",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 0,
-      "title": "Potential Data Loss in Streaming Response",
-      "description": "The streaming logic resets the accumulation buffer when it reaches 1MB. If the upstream provider sends token usage metadata (e.g., OpenAI's `stream_options: {include_usage: true}`) in the final chunk of a stream that exceeds 1MB, the buffer reset may discard the context needed to parse this usage, leading to under-reported costs.",
-      "suggestion": "Implement a rolling buffer or a stream-aware parser that can extract usage metadata without retaining the entire response history, or ensure the final usage chunk is processed independently of the content buffer."
+      "severity": "critical",
+      "file": ".claude/hooks/auto-approve.sh",
+      "line": 45,
+      "title": "Security Bypass: Auto-approving build commands permits arbitrary code execution",
+      "description": "The hook automatically approves commands matching `^npm test` and `^make`. Since the AI agent also has permissions to edit files (like `package.json` or `Makefile`), it can inject malicious commands into the test/build scripts and then execute them. This bypasses the safety net intended by the approval hook system.",
+      "suggestion": "Do not auto-approve commands that execute project-defined scripts (npm, make) if the agent has also modified configuration files in the same session. Require human confirmation for these execution triggers."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": ".github/workflows/claude.yml",
-      "line": 0,
-      "title": "SSRF Risk via MCP Fetch",
-      "description": "The workflow enables `anthropics/mcp-server-fetch` for the AI agent. This allows the agent to make arbitrary HTTP requests from the GitHub Runner environment. A malicious prompt (e.g., via a PR comment) could exploit this to scan internal networks or exfiltrate secrets available to the runner.",
-      "suggestion": "Disable the `fetch` MCP server or configure it with a strict allowlist of domains required for the agent's operation."
+      "file": "cerebra/cmd/main.go",
+      "line": 85,
+      "title": "Security: Unauthenticated Proxy Access",
+      "description": "The `/v1/proxy` endpoint group does not apply `apiKeyAuth` or any other client-side authentication. While it requires upstream provider keys (`Authorization` header), this configuration allows any user with a valid provider key to utilize the Cerebra instance, potentially filling the database with logs and consuming Redis resources (Denial of Service via resource exhaustion).",
+      "suggestion": "Implement a lightweight client authentication mechanism (e.g., a Cerebra-specific Bearer token) for the proxy endpoints, or explicitly document that this service is intended for internal/private network use only."
     },
     {
       "id": 5,
+      "severity": "important",
+      "file": "cerebra/internal/api/handlers.go",
+      "line": 150,
+      "title": "Data Consistency: Race condition in CreateBudget",
+      "description": "The `CreateBudget` handler performs a dual-write: first to Postgres (`UpsertBudget`), then to Redis (`SetBudget`). If the Redis write fails, the function returns a 500 error, but the budget remains committed in Postgres. This leads to a state where a budget exists in the system of record but is not enforced by the proxy (which relies on Redis), effectively failing open for that budget.",
+      "suggestion": "Implement a rollback mechanism (delete from DB if Redis fails) or a background reconciliation worker to sync DB budgets to Redis. Alternatively, wrap the operation in a transaction logic where possible, though difficult across DB/Redis."
+    },
+    {
+      "id": 6,
       "severity": "suggestion",
-      "file": "cerebra/internal/budget/enforcer.go",
-      "line": 0,
-      "title": "Unpredictable Budget Cycles",
-      "description": "Budgets are implemented using a Redis key with a 30-day TTL. This creates rolling, independent billing cycles for each budget entity based on when the key was first created, rather than a predictable calendar-month cycle. This makes financial reporting and reset alignment difficult.",
-      "suggestion": "Use deterministic time buckets for keys (e.g., `budget:{entity_id}:{YYYY-MM}`) to align budgets with standard billing periods."
+      "file": "cerebra/internal/config/config.go",
+      "line": 45,
+      "title": "Insecure Default: Postgres SSL Mode Disabled",
+      "description": "The default `POSTGRES_SSLMODE` is set to `disable`. While acceptable for local Docker Compose, this is dangerous for production deployments. If users forget to set this env var, they may inadvertently connect to production databases without encryption.",
+      "suggestion": "Change the default to `prefer` or `require`, or ensure the documentation explicitly warns about this default for production environments."
     }
   ]
 }
