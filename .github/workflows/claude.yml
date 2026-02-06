@@ -207,14 +207,11 @@ jobs:
           MCP_CONFIG_FILE="${RUNNER_TEMP}/mcp-config.json"
 
           # Use jq for safe JSON generation with proper escaping of special characters
+          # NOTE: fetch MCP server removed to mitigate SSRF risk (arbitrary HTTP from runner)
           jq -n \
             --arg brave_key "$BRAVE_API_KEY" \
             '{
               "mcpServers": {
-                "fetch": {
-                  "command": "npx",
-                  "args": ["-y", "@anthropics/mcp-server-fetch@0.1.0"]
-                },
                 "brave-search": {
                   "command": "npx",
                   "args": ["-y", "@modelcontextprotocol/server-brave-search@0.6.2"],
@@ -238,8 +235,6 @@ jobs:
 
           # CLI arguments for Claude Code
           # - MCP config generated at runtime (avoids fragile inline JSON with secrets)
-          #   ⚠️ SECURITY: fetch server enables arbitrary HTTP requests (SSRF risk in CI/CD)
-          #   Only safe if runner is network-isolated from internal resources
           # - Model selected by Haiku classifier
           claude_args: |
             --max-turns 50

@@ -234,8 +234,8 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 	c.Header("X-Request-ID", reqID)
 	c.Status(resp.StatusCode)
 
-	// Capture streamed data (cap at 1MB to avoid OOM on long streams).
-	// We only need the final chunks which contain usage metadata.
+	// Capture the tail of the streamed data for usage metadata extraction.
+	// Usage info is in the final SSE chunks, so we keep a rolling tail buffer.
 	const maxCapture = 1 << 20 // 1 MB
 	var captured bytes.Buffer
 
@@ -245,13 +245,14 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, reqID
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			w.Write(buf[:n])
-			// Keep only the tail of the stream (last maxCapture bytes).
-			if captured.Len()+n <= maxCapture {
-				captured.Write(buf[:n])
-			} else {
-				// Once we exceed cap, only keep the latest data.
+			captured.Write(buf[:n])
+			// When buffer exceeds cap, discard the oldest half to keep
+			// memory bounded while retaining the tail where usage metadata lives.
+			if captured.Len() > maxCapture {
+				b := captured.Bytes()
+				half := len(b) / 2
 				captured.Reset()
-				captured.Write(buf[:n])
+				captured.Write(b[half:])
 			}
 		}
 		return err == nil

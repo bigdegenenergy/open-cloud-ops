@@ -117,13 +117,17 @@ func main() {
 	// Health check.
 	r.GET("/health", apiHandlers.HealthCheck)
 
-	// API v1 routes (protected by admin API key when configured).
+	// API v1 routes (protected by admin API key).
+	// Fail-secure: if no key is configured, block all management requests.
 	v1 := r.Group("/api/v1")
 	if cfg.AdminAPIKey != "" {
 		v1.Use(apiKeyAuth(cfg.AdminAPIKey))
 		log.Println("Management API authentication enabled.")
 	} else {
-		log.Println("WARNING: CEREBRA_ADMIN_API_KEY not set. Management API is unauthenticated.")
+		log.Println("WARNING: CEREBRA_ADMIN_API_KEY not set. Management API is disabled (fail-secure).")
+		v1.Use(func(c *gin.Context) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "management API disabled: CEREBRA_ADMIN_API_KEY not configured"})
+		})
 	}
 	{
 		// Cost data.
