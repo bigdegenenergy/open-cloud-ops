@@ -56,8 +56,8 @@ on:
         required: false
         default: 'bigdegenenergy/ai-dev-toolkit'
         type: string
-      source_branch:
-        description: 'Source branch to sync from'
+      source_ref:
+        description: 'Source ref to sync from (branch, tag, or commit SHA - prefer pinned SHA for security)'
         required: false
         default: 'main'
         type: string
@@ -79,7 +79,7 @@ on:
 
 env:
   SOURCE_REPO: ${{ inputs.source_repo || 'bigdegenenergy/ai-dev-toolkit' }}
-  SOURCE_BRANCH: ${{ inputs.source_branch || 'main' }}
+  SOURCE_REF: ${{ inputs.source_ref || 'main' }}
 
 jobs:
   sync:
@@ -113,13 +113,16 @@ jobs:
 
       - name: Fetch source repo
         run: |
-          echo "📥 Fetching latest from ${{ env.SOURCE_REPO }}..."
+          echo "📥 Fetching from ${{ env.SOURCE_REPO }} at ref ${{ env.SOURCE_REF }}..."
 
-          # Clone source repo to temp directory
-          git clone --depth 1 --branch ${{ env.SOURCE_BRANCH }} \
+          # Clone source repo and checkout the pinned ref (branch, tag, or SHA)
+          git clone --no-checkout \
             https://github.com/${{ env.SOURCE_REPO }}.git /tmp/claude-code-source
+          cd /tmp/claude-code-source
+          git checkout ${{ env.SOURCE_REF }}
+          cd -
 
-          echo "✅ Source repo fetched successfully"
+          echo "✅ Source repo fetched at $(cd /tmp/claude-code-source && git rev-parse HEAD)"
 
       - name: Sync .claude directory
         id: sync_claude

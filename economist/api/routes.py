@@ -11,6 +11,8 @@ All endpoints live under ``/api/v1/`` and are grouped into:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -19,7 +21,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from internal.ingestion.collector import CostCollector
@@ -46,15 +48,36 @@ logger = logging.getLogger(__name__)
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
+def _hash_api_key(key: str) -> str:
+    """SHA-256 hash an API key (consistent with Cerebra/Aegis)."""
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
 async def require_api_key(
     api_key: str | None = Security(_api_key_header),
+    db: Session = Depends(get_session),
 ) -> str:
-    """Validate that requests include an API key."""
+    """Validate API key against the api_keys table using SHA-256 hash."""
     if not api_key:
         raise HTTPException(
             status_code=401,
             detail="Missing API key. Provide X-API-Key header.",
         )
+
+    key_prefix = api_key[:8] if len(api_key) >= 8 else api_key
+    key_hash = _hash_api_key(api_key)
+
+    row = db.execute(
+        text(
+            "SELECT key_hash FROM api_keys "
+            "WHERE key_prefix = :prefix AND revoked = false"
+        ),
+        {"prefix": key_prefix},
+    ).fetchone()
+
+    if row is None or not hmac.compare_digest(row[0], key_hash):
+        raise HTTPException(status_code=401, detail="Invalid API key.")
+
     return api_key
 
 

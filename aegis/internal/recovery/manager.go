@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"sync"
@@ -295,14 +296,18 @@ func (m *RecoveryManager) ValidateBackup(ctx context.Context, backupID string) e
 		return fmt.Errorf("recovery: failed to load manifest: %w", err)
 	}
 
-	// Verify the archive exists and checksum matches
-	archiveData, err := m.storage.Read(ctx, record.StoragePath)
+	// Verify the archive exists and checksum matches (streaming to avoid OOM)
+	reader, err := m.storage.OpenReader(ctx, record.StoragePath)
 	if err != nil {
-		return fmt.Errorf("recovery: failed to read archive: %w", err)
+		return fmt.Errorf("recovery: failed to open archive: %w", err)
 	}
+	defer reader.Close()
 
-	hash := sha256.Sum256(archiveData)
-	actualChecksum := hex.EncodeToString(hash[:])
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return fmt.Errorf("recovery: failed to hash archive: %w", err)
+	}
+	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
 
 	if manifest.Checksum != "" && actualChecksum != manifest.Checksum {
 		return fmt.Errorf("recovery: checksum mismatch for backup %s: expected %s, got %s",

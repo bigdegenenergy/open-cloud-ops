@@ -4,6 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +44,7 @@ type BackupManager struct {
 	storage       StorageBackend
 	storagePath   string
 	retentionDays int
+	encryptionKey []byte // Optional AES-256 key for encrypting archives at rest
 
 	mu      sync.RWMutex
 	jobs    map[string]*models.BackupJob
@@ -48,8 +52,10 @@ type BackupManager struct {
 }
 
 // NewBackupManager creates a new BackupManager with the given dependencies.
+// If encryptionKeyHex is non-empty, archives will be AES-GCM encrypted at rest.
+// The key must be a 64-character hex string (32 bytes / AES-256).
 func NewBackupManager(kubeClient KubeClient, storage StorageBackend, storagePath string, retentionDays int) *BackupManager {
-	return &BackupManager{
+	m := &BackupManager{
 		kubeClient:    kubeClient,
 		storage:       storage,
 		storagePath:   storagePath,
@@ -57,6 +63,19 @@ func NewBackupManager(kubeClient KubeClient, storage StorageBackend, storagePath
 		jobs:          make(map[string]*models.BackupJob),
 		records:       make(map[string][]*models.BackupRecord),
 	}
+
+	// Load optional encryption key from environment
+	if keyHex := os.Getenv("AEGIS_BACKUP_ENCRYPTION_KEY"); keyHex != "" {
+		key, err := hex.DecodeString(keyHex)
+		if err != nil || len(key) != 32 {
+			log.Printf("backup: WARNING: AEGIS_BACKUP_ENCRYPTION_KEY must be 64 hex chars (AES-256); encryption disabled")
+		} else {
+			m.encryptionKey = key
+			log.Printf("backup: AES-256-GCM encryption enabled for archives")
+		}
+	}
+
+	return m
 }
 
 // CreateJob registers a new backup job. It validates the job configuration,
@@ -208,6 +227,23 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 	defer os.Remove(archivePath)
 
 	manifest.Checksum = checksum
+
+	// Encrypt archive at rest if an encryption key is configured
+	if m.encryptionKey != nil {
+		encPath, encErr := m.encryptFile(archivePath)
+		if encErr != nil {
+			completedAt := time.Now().UTC()
+			record.Status = models.RecordStatusFailed
+			record.ErrorMessage = fmt.Sprintf("failed to encrypt archive: %v", encErr)
+			record.CompletedAt = &completedAt
+			record.DurationMs = completedAt.Sub(record.StartedAt).Milliseconds()
+			return record, fmt.Errorf("backup: %s", record.ErrorMessage)
+		}
+		// Replace the plain archive with the encrypted one
+		os.Remove(archivePath)
+		archivePath = encPath
+		defer os.Remove(encPath)
+	}
 
 	// Store the archive by streaming from temp file (avoids loading into memory)
 	storagePath := fmt.Sprintf("%s/%s/%s.tar.gz", jobID, record.ID, record.ID)
@@ -498,6 +534,47 @@ func createArchive(manifest models.BackupManifest) (string, string, error) {
 	checksum := hex.EncodeToString(hashWriter.Sum(nil))
 
 	return tmpPath, checksum, nil
+}
+
+// encryptFile encrypts a file using AES-256-GCM and writes the result to a new
+// temp file. Returns the path to the encrypted file. The nonce is prepended to
+// the ciphertext. The caller is responsible for removing the output file.
+func (m *BackupManager) encryptFile(plainPath string) (string, error) {
+	plainData, err := os.ReadFile(plainPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file for encryption: %w", err)
+	}
+
+	block, err := aes.NewCipher(m.encryptionKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, plainData, nil)
+
+	encFile, err := os.CreateTemp("", "aegis-backup-enc-*.tar.gz.enc")
+	if err != nil {
+		return "", fmt.Errorf("failed to create encrypted temp file: %w", err)
+	}
+	os.Chmod(encFile.Name(), 0600)
+	defer encFile.Close()
+
+	if _, err := encFile.Write(ciphertext); err != nil {
+		os.Remove(encFile.Name())
+		return "", fmt.Errorf("failed to write encrypted data: %w", err)
+	}
+
+	return encFile.Name(), nil
 }
 
 // calculateNextRun computes the next run time from a cron-like schedule string.

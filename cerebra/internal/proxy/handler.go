@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -51,6 +52,10 @@ type ProxyHandler struct {
 	pricing  map[string]models.ModelPricing // keyed by "provider:model"
 	client   *http.Client
 	logCh    chan models.APIRequest
+
+	// droppedLogs tracks the number of log entries dropped due to a full buffer.
+	// Expose via a Prometheus counter or /metrics endpoint for observability.
+	droppedLogs atomic.Int64
 }
 
 // NewProxyHandler creates a new ProxyHandler instance with all required dependencies.
@@ -252,7 +257,8 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 	select {
 	case h.logCh <- apiReq:
 	default:
-		log.Printf("proxy: log queue full, dropping request log for %s", apiReq.ID)
+		dropped := h.droppedLogs.Add(1)
+		log.Printf("proxy: log queue full, dropping request log for %s (total dropped: %d)", apiReq.ID, dropped)
 	}
 
 	// 10. Return original response to client
@@ -486,6 +492,11 @@ func (h *ProxyHandler) logRequest(ctx context.Context, req models.APIRequest) {
 	if err != nil {
 		log.Printf("proxy: failed to log API request %s: %v", req.ID, err)
 	}
+}
+
+// DroppedLogCount returns the total number of log entries dropped due to a full buffer.
+func (h *ProxyHandler) DroppedLogCount() int64 {
+	return h.droppedLogs.Load()
 }
 
 // GetPricing returns the current pricing map (used by tests and other components).

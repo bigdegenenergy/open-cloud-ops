@@ -30,6 +30,10 @@ type StorageBackend interface {
 	// Read retrieves data from the given path.
 	Read(ctx context.Context, path string) ([]byte, error)
 
+	// OpenReader returns a streaming reader for the given path.
+	// The caller must close the returned ReadCloser.
+	OpenReader(ctx context.Context, path string) (io.ReadCloser, error)
+
 	// Delete removes the data at the given path.
 	Delete(ctx context.Context, path string) error
 
@@ -200,6 +204,29 @@ func (s *LocalStorage) WriteFromFile(ctx context.Context, storagePath, localFile
 	return nil
 }
 
+// OpenReader returns a streaming reader for the file at the given path.
+func (s *LocalStorage) OpenReader(ctx context.Context, path string) (io.ReadCloser, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	fullPath, err := s.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := os.Open(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("storage: file not found at %q", path)
+		}
+		return nil, fmt.Errorf("storage: failed to open %q: %w", path, err)
+	}
+	return f, nil
+}
+
 // Read retrieves data from the given path on the local filesystem.
 func (s *LocalStorage) Read(ctx context.Context, path string) ([]byte, error) {
 	select {
@@ -350,6 +377,10 @@ func (s *S3Storage) WriteFromFile(ctx context.Context, storagePath, localFilePat
 }
 
 func (s *S3Storage) Read(ctx context.Context, path string) ([]byte, error) {
+	return nil, fmt.Errorf("storage: S3 backend not yet implemented")
+}
+
+func (s *S3Storage) OpenReader(ctx context.Context, path string) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("storage: S3 backend not yet implemented")
 }
 
