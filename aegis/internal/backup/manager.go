@@ -48,6 +48,7 @@ type BackupManager struct {
 	retentionDays      int
 	encryptionKey      []byte // Optional AES-256 key for encrypting archives at rest
 	encryptionRequired bool   // Fail-closed: if true, backups fail when no key is set
+	tempDir            string // Directory for staging temp files (default: os.TempDir)
 
 	mu      sync.RWMutex
 	jobs    map[string]*models.BackupJob
@@ -58,11 +59,17 @@ type BackupManager struct {
 // If encryptionKeyHex is non-empty, archives will be AES-GCM encrypted at rest.
 // The key must be a 64-character hex string (32 bytes / AES-256).
 func NewBackupManager(kubeClient KubeClient, storage StorageBackend, storagePath string, retentionDays int) *BackupManager {
+	tempDir := os.Getenv("AEGIS_TEMP_PATH")
+	if tempDir == "" {
+		tempDir = os.TempDir()
+	}
+
 	m := &BackupManager{
 		kubeClient:    kubeClient,
 		storage:       storage,
 		storagePath:   storagePath,
 		retentionDays: retentionDays,
+		tempDir:       tempDir,
 		jobs:          make(map[string]*models.BackupJob),
 		records:       make(map[string][]*models.BackupRecord),
 	}
@@ -280,7 +287,7 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 	}
 
 	// Create compressed tar.gz archive (streamed to temp file)
-	archivePath, checksum, err := createArchive(manifest)
+	archivePath, checksum, err := createArchive(manifest, m.tempDir)
 	if err != nil {
 		completedAt := time.Now().UTC()
 		record.Status = models.RecordStatusFailed
@@ -542,8 +549,9 @@ func (m *BackupManager) LoadManifest(ctx context.Context, recordID string) (*mod
 // createArchive builds a tar.gz archive containing the serialized resources
 // and returns the temp file path and its SHA-256 checksum.
 // The caller is responsible for removing the temp file when done.
-func createArchive(manifest models.BackupManifest) (string, string, error) {
-	tmpFile, err := os.CreateTemp("", "aegis-backup-*.tar.gz")
+// The tempDir parameter controls where staging files are written; pass "" for os default.
+func createArchive(manifest models.BackupManifest, tempDir string) (string, string, error) {
+	tmpFile, err := os.CreateTemp(tempDir, "aegis-backup-*.tar.gz")
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -642,7 +650,7 @@ func (m *BackupManager) encryptFile(plainPath string) (string, error) {
 	}
 	defer src.Close()
 
-	encFile, err := os.CreateTemp("", "aegis-backup-enc-*.tar.gz.enc")
+	encFile, err := os.CreateTemp(m.tempDir, "aegis-backup-enc-*.tar.gz.enc")
 	if err != nil {
 		return "", fmt.Errorf("failed to create encrypted temp file: %w", err)
 	}

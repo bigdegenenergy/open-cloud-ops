@@ -8,6 +8,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -68,17 +69,20 @@ func Load() (*Config, error) {
 	pgPassword := os.Getenv("POSTGRES_PASSWORD")
 	pgSSLMode := getEnvOrDefault("POSTGRES_SSLMODE", "require")
 
-	if pgPassword == "" {
-		cfg.DatabaseURL = fmt.Sprintf(
-			"postgres://%s@%s:%s/%s?sslmode=%s",
-			pgUser, pgHost, pgPort, pgDB, pgSSLMode,
-		)
-	} else {
-		cfg.DatabaseURL = fmt.Sprintf(
-			"postgres://%s:%s@%s:%s/%s?sslmode=%s",
-			pgUser, pgPassword, pgHost, pgPort, pgDB, pgSSLMode,
-		)
+	// Use url.UserPassword to properly percent-encode credentials that may
+	// contain reserved URI characters (@, :, /, etc.).
+	dsn := &url.URL{
+		Scheme:   "postgres",
+		Host:     fmt.Sprintf("%s:%s", pgHost, pgPort),
+		Path:     pgDB,
+		RawQuery: fmt.Sprintf("sslmode=%s", pgSSLMode),
 	}
+	if pgPassword == "" {
+		dsn.User = url.User(pgUser)
+	} else {
+		dsn.User = url.UserPassword(pgUser, pgPassword)
+	}
+	cfg.DatabaseURL = dsn.String()
 
 	// Allow overriding with a full DATABASE_URL if provided
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
