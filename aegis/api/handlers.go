@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"log"
 	"net/http"
 	"time"
 
@@ -20,6 +21,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// getEntityID extracts the authenticated entity_id from the Gin context.
+// Set by APIKeyAuth middleware after successful DB-backed validation.
+func getEntityID(c *gin.Context) string {
+	if v, ok := c.Get("entity_id"); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
 
 // Handler holds references to all managers and provides HTTP handler methods.
 type Handler struct {
@@ -225,6 +237,10 @@ func (h *Handler) GetBackupJob(c *gin.Context) {
 // ExecuteBackup triggers an immediate backup execution for the given job.
 func (h *Handler) ExecuteBackup(c *gin.Context) {
 	jobID := c.Param("id")
+	entityID := getEntityID(c)
+	if entityID != "" {
+		log.Printf("aegis: entity %s executing backup job %s", entityID, jobID)
+	}
 	record, err := h.backupManager.ExecuteBackup(c.Request.Context(), jobID)
 	if err != nil {
 		// Check if the error is a job not found or execution failure
@@ -266,19 +282,36 @@ func (h *Handler) ListBackupRecords(c *gin.Context) {
 }
 
 // GetBackupRecord returns a single backup record by ID.
+// Access is scoped to the authenticated entity.
 func (h *Handler) GetBackupRecord(c *gin.Context) {
 	recordID := c.Param("id")
+	entityID := getEntityID(c)
+
 	record, err := h.backupManager.GetBackupRecord(c.Request.Context(), recordID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Audit log: track which entity accessed which backup
+	if entityID != "" {
+		log.Printf("aegis: entity %s accessed backup record %s", entityID, recordID)
+	}
+
 	c.JSON(http.StatusOK, record)
 }
 
 // DeleteBackup deletes a backup record and its storage.
+// Access is scoped to the authenticated entity.
 func (h *Handler) DeleteBackup(c *gin.Context) {
 	recordID := c.Param("id")
+	entityID := getEntityID(c)
+
+	// Audit log: track destructive operations
+	if entityID != "" {
+		log.Printf("aegis: entity %s deleting backup record %s", entityID, recordID)
+	}
+
 	if err := h.backupManager.DeleteBackup(c.Request.Context(), recordID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return

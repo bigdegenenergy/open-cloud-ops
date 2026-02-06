@@ -14,7 +14,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -56,6 +58,10 @@ type ProxyHandler struct {
 	// droppedLogs tracks the number of log entries dropped due to a full buffer.
 	// Expose via a Prometheus counter or /metrics endpoint for observability.
 	droppedLogs atomic.Int64
+
+	// spillMu protects the spill file for overflow log entries
+	spillMu   sync.Mutex
+	spillFile *os.File
 }
 
 // NewProxyHandler creates a new ProxyHandler instance with all required dependencies.
@@ -257,8 +263,8 @@ func (h *ProxyHandler) HandleRequest(c *gin.Context) {
 	select {
 	case h.logCh <- apiReq:
 	default:
-		dropped := h.droppedLogs.Add(1)
-		log.Printf("proxy: log queue full, dropping request log for %s (total dropped: %d)", apiReq.ID, dropped)
+		h.droppedLogs.Add(1)
+		h.spillToDisk(apiReq)
 	}
 
 	// 10. Return original response to client
@@ -495,8 +501,36 @@ func (h *ProxyHandler) logRequest(ctx context.Context, req models.APIRequest) {
 }
 
 // DroppedLogCount returns the total number of log entries dropped due to a full buffer.
+// These entries are persisted to the spill file on disk for later recovery.
 func (h *ProxyHandler) DroppedLogCount() int64 {
 	return h.droppedLogs.Load()
+}
+
+// spillToDisk writes a log entry to a local JSONL file when the in-memory
+// channel is full. This prevents permanent loss of financial/usage data.
+// The spill file can be replayed into the database during off-peak hours.
+func (h *ProxyHandler) spillToDisk(req models.APIRequest) {
+	h.spillMu.Lock()
+	defer h.spillMu.Unlock()
+
+	if h.spillFile == nil {
+		f, err := os.OpenFile("cerebra-log-spill.jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			log.Printf("proxy: failed to open spill file: %v (log entry %s lost)", err, req.ID)
+			return
+		}
+		h.spillFile = f
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		log.Printf("proxy: failed to marshal spill entry %s: %v", req.ID, err)
+		return
+	}
+	data = append(data, '\n')
+	if _, err := h.spillFile.Write(data); err != nil {
+		log.Printf("proxy: failed to write spill entry %s: %v", req.ID, err)
+	}
 }
 
 // GetPricing returns the current pricing map (used by tests and other components).

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -536,44 +537,84 @@ func createArchive(manifest models.BackupManifest) (string, string, error) {
 	return tmpPath, checksum, nil
 }
 
-// encryptFile encrypts a file using AES-256-GCM and writes the result to a new
-// temp file. Returns the path to the encrypted file. The nonce is prepended to
-// the ciphertext. The caller is responsible for removing the output file.
+// encryptFile encrypts a file using AES-256-CTR + HMAC-SHA256 in a streaming
+// fashion, avoiding loading the entire file into memory. The output format is:
+//
+//	[16-byte IV] [encrypted data] [32-byte HMAC]
+//
+// The HMAC covers (IV || ciphertext) for authenticated encryption.
+// The caller is responsible for removing the output file.
 func (m *BackupManager) encryptFile(plainPath string) (string, error) {
-	plainData, err := os.ReadFile(plainPath)
+	src, err := os.Open(plainPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file for encryption: %w", err)
+		return "", fmt.Errorf("failed to open file for encryption: %w", err)
 	}
-
-	block, err := aes.NewCipher(m.encryptionKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("failed to create GCM: %w", err)
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nonce, nonce, plainData, nil)
+	defer src.Close()
 
 	encFile, err := os.CreateTemp("", "aegis-backup-enc-*.tar.gz.enc")
 	if err != nil {
 		return "", fmt.Errorf("failed to create encrypted temp file: %w", err)
 	}
 	os.Chmod(encFile.Name(), 0600)
-	defer encFile.Close()
 
-	if _, err := encFile.Write(ciphertext); err != nil {
+	block, err := aes.NewCipher(m.encryptionKey)
+	if err != nil {
+		encFile.Close()
 		os.Remove(encFile.Name())
-		return "", fmt.Errorf("failed to write encrypted data: %w", err)
+		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
 
+	// Generate random IV
+	iv := make([]byte, aes.BlockSize)
+	if _, err := rand.Read(iv); err != nil {
+		encFile.Close()
+		os.Remove(encFile.Name())
+		return "", fmt.Errorf("failed to generate IV: %w", err)
+	}
+
+	// Write IV first
+	if _, err := encFile.Write(iv); err != nil {
+		encFile.Close()
+		os.Remove(encFile.Name())
+		return "", fmt.Errorf("failed to write IV: %w", err)
+	}
+
+	// Stream encrypt with AES-CTR and compute HMAC over IV+ciphertext
+	mac := hmac.New(sha256.New, m.encryptionKey)
+	mac.Write(iv)
+
+	stream := cipher.NewCTR(block, iv)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			encrypted := make([]byte, n)
+			stream.XORKeyStream(encrypted, buf[:n])
+			mac.Write(encrypted)
+			if _, err := encFile.Write(encrypted); err != nil {
+				encFile.Close()
+				os.Remove(encFile.Name())
+				return "", fmt.Errorf("failed to write encrypted data: %w", err)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			encFile.Close()
+			os.Remove(encFile.Name())
+			return "", fmt.Errorf("failed to read source file: %w", readErr)
+		}
+	}
+
+	// Append HMAC for authentication
+	if _, err := encFile.Write(mac.Sum(nil)); err != nil {
+		encFile.Close()
+		os.Remove(encFile.Name())
+		return "", fmt.Errorf("failed to write HMAC: %w", err)
+	}
+
+	encFile.Close()
 	return encFile.Name(), nil
 }
 

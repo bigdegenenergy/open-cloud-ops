@@ -9,11 +9,15 @@ recommendations.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from typing import Any
 
 from pkg.cloud.base import CloudProvider
 from pkg.config import get_settings
+
+# GCP project IDs: 6-30 chars, lowercase letters, digits, hyphens
+_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9\-]{4,28}[a-z0-9]$")
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,13 @@ class GCPProvider(CloudProvider):
 
     def __init__(self, settings=None):
         self._settings = settings or get_settings()
+        # Validate project ID to prevent query injection in BigQuery
+        pid = self._settings.gcp_project_id
+        if pid and not _PROJECT_ID_RE.match(pid):
+            raise ValueError(
+                f"Invalid GCP project ID format: {pid!r}. "
+                "Expected 6-30 lowercase alphanumeric/hyphen characters."
+            )
         self._initialized = False
         self._billing_client = None
         self._resource_client = None
@@ -116,9 +127,7 @@ class GCPProvider(CloudProvider):
 
                 usage_time = row.usage_start_time
                 cost_date = (
-                    usage_time.date()
-                    if hasattr(usage_time, "date")
-                    else start_date
+                    usage_time.date() if hasattr(usage_time, "date") else start_date
                 )
 
                 costs.append(
@@ -132,8 +141,7 @@ class GCPProvider(CloudProvider):
                         "usage_quantity": float(row.usage_amount or 0),
                         "usage_unit": row.usage_unit or "",
                         "region": row.region or "global",
-                        "account_id": row.project_id
-                        or self._settings.gcp_project_id,
+                        "account_id": row.project_id or self._settings.gcp_project_id,
                         "tags": tags,
                         "date": cost_date.isoformat(),
                     }
@@ -180,9 +188,7 @@ class GCPProvider(CloudProvider):
                         "resource_id": asset.name,
                         "resource_type": asset.asset_type,
                         "region": (
-                            resource_data.location
-                            if resource_data
-                            else "unknown"
+                            resource_data.location if resource_data else "unknown"
                         ),
                         "provider": "gcp",
                         "tags": labels,
@@ -241,8 +247,7 @@ class GCPProvider(CloudProvider):
                                         rec.content.operation_groups[0]
                                         .operations[0]
                                         .resource
-                                        if rec.content
-                                        and rec.content.operation_groups
+                                        if rec.content and rec.content.operation_groups
                                         else "unknown"
                                     ),
                                     "resource_type": self._map_recommender_to_type(
@@ -252,9 +257,7 @@ class GCPProvider(CloudProvider):
                                         recommender_id
                                     ),
                                     "title": rec.description or recommender_id,
-                                    "description": (
-                                        rec.description or ""
-                                    ),
+                                    "description": (rec.description or ""),
                                     "estimated_monthly_savings": savings,
                                     "confidence": self._priority_to_confidence(
                                         rec.priority
@@ -286,10 +289,7 @@ class GCPProvider(CloudProvider):
             from google.cloud import compute_v1
 
             client = compute_v1.ZonesClient()
-            zones = [
-                z.name
-                for z in client.list(project=self._settings.gcp_project_id)
-            ]
+            zones = [z.name for z in client.list(project=self._settings.gcp_project_id)]
             return zones or ["us-central1-a"]
         except Exception:
             return ["us-central1-a", "us-east1-b", "europe-west1-b"]
