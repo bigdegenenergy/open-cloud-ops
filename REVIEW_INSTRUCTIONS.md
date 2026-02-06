@@ -5,63 +5,90 @@
 ```json
 {
   "review": {
-    "summary": "The PR implements a massive feature set with high architectural quality, but contains critical security vulnerabilities (timing attacks, command injection) and significant stability risks (OOM in backup logic) that require immediate remediation.",
+    "summary": "The platform implementation is structurally sound, but the custom automation components (Lobster engine) and the backup logic (Aegis) contain security and stability risks. Specifically, the workflow engine's use of shell execution and the creation of world-readable backup files containing Kubernetes secrets must be addressed before merging.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
     {
       "id": 1,
       "severity": "critical",
-      "file": "cerebra/internal/middleware/middleware.go",
-      "line": 0,
-      "title": "Variable-time API Key comparison",
-      "description": "The AuthMiddleware compares SHA-256 hashes using standard inequality operators (`storedHash != keyHash`). This is vulnerable to timing attacks, allowing an attacker to reconstruct the valid hash byte-by-byte by measuring response times.",
-      "suggestion": "Use `crypto/subtle.ConstantTimeCompare` for all sensitive credential comparisons."
+      "file": ".claude/workflows/lobster/engine.py",
+      "line": 150,
+      "title": "Command Injection via shell=True",
+      "description": "The Lobster engine uses `subprocess.run(..., shell=True)` for SHELL-type steps. While `shlex.quote` is used for variable substitution, executing user-defined or AI-generated workflow steps in a shell context is highly susceptible to injection if the base command string itself is manipulated or if variables are incorrectly escaped.",
+      "suggestion": "Refactor to use `shell=False` and pass arguments as a list. If a shell is absolutely required, use a strictly validated allowlist of commands and avoid any dynamic string interpolation for the command itself."
     },
     {
       "id": 2,
       "severity": "important",
       "file": "aegis/internal/backup/manager.go",
-      "line": 0,
-      "title": "OOM risk in backup archiving",
-      "description": "The `createArchive` function utilizes `io.ReadAll` to load the entire backup archive into a byte slice before processing. For Kubernetes clusters with significant resource counts or large secrets/configmaps, this will lead to Out-Of-Memory (OOM) crashes of the Aegis service.",
-      "suggestion": "Refactor the backup pipeline to use `io.Pipe` or stream directly to the storage backend using `io.Writer` interfaces instead of buffering the entire archive in memory."
+      "line": 210,
+      "title": "Insecure File Permissions for Secret Backups",
+      "description": "Backup archives are created with default system permissions (likely 0644). Since these archives contain full Kubernetes resource manifests, including 'Secrets' and 'ConfigMaps', they are readable by any local user on the system or inside the container.",
+      "suggestion": "Explicitly set permissions to `0600` for all temporary files and final archives generated during the backup process. Ensure the storage backend also enforces strict ACLs."
     },
     {
       "id": 3,
-      "severity": "critical",
-      "file": ".claude/workflows/lobster/engine.py",
-      "line": 0,
-      "title": "Shell Command Injection in Workflow Engine",
-      "description": "The engine uses `subprocess.run(..., shell=True)` and performs manual string replacement for variables `{{ var }}`. If a workflow definition uses variables sourced from external inputs (like PR titles or chat messages), an attacker can execute arbitrary commands on the runner environment.",
-      "suggestion": "Avoid `shell=True`. Pass arguments as a list and use `shlex.split` for command parsing, or ensure that all variable interpolation is strictly sanitized/validated against a whitelist before execution."
+      "severity": "important",
+      "file": "economist/api/routes.py",
+      "line": 15,
+      "title": "Non-Thread-Safe Global State",
+      "description": "The Economist module uses global variables (`_collector`, `_optimizer`, `_policy_engine`) initialized via `configure_routes`. In a multi-worker production environment (e.g., Gunicorn/Uvicorn), this pattern can lead to race conditions or uninitialized state across different worker processes.",
+      "suggestion": "Use FastAPI's dependency injection system (`Depends`) or attach these instances to the `app.state`. Avoid global variables for service engines."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 0,
-      "title": "Potential data loss in asynchronous logging",
-      "description": "Request metadata is logged asynchronously via `go h.logRequest(reqCtx)`. If the Cerebra process crashes or is restarted immediately after a proxy response but before the goroutine completes, billing and audit data for that request will be lost.",
-      "suggestion": "Use a buffered channel and a worker pool with a graceful shutdown handler that flushes the channel, or log synchronously if data integrity for billing is a hard requirement."
+      "file": "cerebra/internal/router/router.go",
+      "line": 185,
+      "title": "Inaccurate Token Estimation for Budgeting",
+      "description": "The router uses a hardcoded heuristic `len(text)/4` for token estimation. This is highly inaccurate for non-English languages (CJK) and code snippets, potentially leading to significant budget overruns or incorrect routing decisions in the 'Cost-Optimized' strategy.",
+      "suggestion": "Integrate a proper tiktoken (for OpenAI) or similar library for each provider to get accurate token counts, or at least use a more conservative multiplier for non-ASCII characters."
     },
     {
       "id": 5,
-      "severity": "suggestion",
-      "file": "economist/pkg/cost/calculator.py",
-      "line": 0,
-      "title": "Static exchange rates in financial calculations",
-      "description": "The calculator uses a static dictionary for currency exchange rates. In a FinOps context, this will lead to increasingly inaccurate reports as market conditions change.",
-      "suggestion": "Implement a caching provider that fetches daily rates from a reliable source (e.g., Fixer.io or Open Exchange Rates) with a fallback to the static registry."
+      "severity": "important",
+      "file": "economist/cmd/main.py",
+      "line": 45,
+      "title": "Overly Permissive CORS Policy",
+      "description": "CORS is configured with `allow_origins=[\"*\"]`. This service handles sensitive cloud cost data and credentials; allowing any origin to make requests is a significant security risk.",
+      "suggestion": "Restrict `allow_origins` to specific, trusted domains defined in the environment configuration."
     },
     {
       "id": 6,
+      "severity": "critical",
+      "file": ".claude/commands/gateway-start.md",
+      "line": 42,
+      "title": "Remote Code Execution via ChatOps",
+      "description": "The Gateway triggers allow raw chat input to be passed as commands to Claude Code. If the signature verification is compromised or if a user with 'MEMBER' access is malicious, they can trigger arbitrary code execution on the runner through prompt injection or direct CLI command execution.",
+      "suggestion": "Implement a strict command parser on the Gateway side that only allows a hardcoded set of parameters. Do not pass raw chat strings directly to the AI agent's execution loop."
+    },
+    {
+      "id": 7,
+      "severity": "suggestion",
+      "file": "aegis/internal/backup/manager.go",
+      "line": 232,
+      "title": "Undefined Variable Reference in Logging",
+      "description": "The log statement references `archiveData`, which is not defined in the scope of the function. This will cause a compilation error.",
+      "suggestion": "Change the reference to the actual file size variable or the archive path string."
+    },
+    {
+      "id": 8,
       "severity": "important",
-      "file": "deploy/docker/docker-compose.yml",
-      "line": 0,
-      "title": "Hardcoded default credentials in deployment",
-      "description": "The compose file contains hardcoded passwords like 'change_me_to_a_strong_password'. While useful for dev, these often leak into production environments if not strictly gated.",
-      "suggestion": "Remove default password values and force the use of an `.env` file that is listed in `.gitignore`, or use Docker Secrets."
+      "file": "deploy/kubernetes/postgres-statefulset.yaml",
+      "line": 45,
+      "title": "Insufficient Memory Limits for TimescaleDB",
+      "description": "The memory limit is set to 512Mi. TimescaleDB/Postgres requires significantly more memory for indexing and chunk management in high-volume time-series scenarios (like FinOps ingestion).",
+      "suggestion": "Increase the memory limit to at least 2Gi for production-like workloads."
+    },
+    {
+      "id": 9,
+      "severity": "important",
+      "file": ".github/workflows/security.yml",
+      "line": 85,
+      "title": "PII Scanner Path Exclusions",
+      "description": "The PII scanner excludes the `.claude/` and `scripts/` directories. These directories contain hooks and automation scripts that are most likely to accidentally contain hardcoded secrets or PII during development.",
+      "suggestion": "Remove these exclusions or use a more granular ignore list. Security-sensitive directories should always be scanned."
     }
   ]
 }
