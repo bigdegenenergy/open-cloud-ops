@@ -1,0 +1,76 @@
+version: "3.8"
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    container_name: oco-postgres
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-opencloudops}
+      POSTGRES_USER: ${POSTGRES_USER:-oco_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oco_user -d opencloudops"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis cache
+  redis:
+    image: redis:7-alpine
+    container_name: oco-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Cerebra LLM Gateway
+  cerebra:
+    build:
+      context: ../../cerebra
+      dockerfile: ../deploy/docker/Dockerfile.cerebra
+    container_name: oco-cerebra
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      CEREBRA_PORT: "8080"
+      CEREBRA_LOG_LEVEL: debug
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-opencloudops}
+      POSTGRES_USER: ${POSTGRES_USER:-oco_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CEREBRA_ADMIN_API_KEY: ${CEREBRA_ADMIN_API_KEY:-}
+      CEREBRA_BUDGET_FAIL_OPEN: ${CEREBRA_BUDGET_FAIL_OPEN:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Dashboard (React)
+  dashboard:
+    build:
+      context: ../../dashboard
+      dockerfile: ../deploy/docker/Dockerfile.dashboard
+    container_name: oco-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8080
+    depends_on:
+      - cerebra
+
+volumes:
+  pgdata:

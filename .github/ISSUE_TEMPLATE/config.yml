@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/bigdegenenergy/ai-dev-toolkit
+    about: Read the source repository documentation before creating issues
+  - name: Claude Code Official Docs
+    url: https://code.claude.com/docs/
+    about: Official Claude Code documentation

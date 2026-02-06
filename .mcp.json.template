@@ -1,0 +1,101 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schemas/mcp.json",
+  "comment": "MCP Server Configuration Template - Rename to .mcp.json and configure",
+
+  "mcpServers": {
+
+    "github": {
+      "comment": "GitHub integration for PR management, issues, and repository operations",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "disabled": true
+    },
+
+    "slack": {
+      "comment": "Slack integration for reading channels and team communication",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-slack"],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+        "SLACK_TEAM_ID": "${SLACK_TEAM_ID}"
+      },
+      "disabled": true
+    },
+
+    "postgres": {
+      "comment": "PostgreSQL database integration for schema inspection and queries",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "DATABASE_URL": "${DATABASE_URL}"
+      },
+      "disabled": true
+    },
+
+    "sqlite": {
+      "comment": "SQLite database integration for local development databases",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sqlite"],
+      "env": {
+        "SQLITE_DB_PATH": "./data/dev.db"
+      },
+      "disabled": true
+    },
+
+    "filesystem": {
+      "comment": "Extended filesystem access for specific directories",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"],
+      "disabled": true
+    },
+
+    "memory": {
+      "comment": "Persistent memory for cross-session context",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "disabled": true
+    },
+
+    "brave-search": {
+      "comment": "Web search integration via Brave Search API",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      },
+      "disabled": true
+    },
+
+    "puppeteer": {
+      "comment": "Browser automation for web scraping and testing",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "disabled": true
+    },
+
+    "sentry": {
+      "comment": "Sentry integration for error tracking and monitoring",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sentry"],
+      "env": {
+        "SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}",
+        "SENTRY_ORG": "${SENTRY_ORG}",
+        "SENTRY_PROJECT": "${SENTRY_PROJECT}"
+      },
+      "disabled": true
+    },
+
+    "linear": {
+      "comment": "Linear integration for issue tracking and project management",
+      "command": "npx",
+      "args": ["-y", "mcp-server-linear"],
+      "env": {
+        "LINEAR_API_KEY": "${LINEAR_API_KEY}"
+      },
+      "disabled": true
+    }
+  }
+}

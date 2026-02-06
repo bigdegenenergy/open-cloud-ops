@@ -1,0 +1,366 @@
+# Claude Auto-Implement from Issues
+#
+# Automatically implements features/fixes when issues are labeled with 'claude-implement'.
+# Creates a feature branch, implements the code, and opens a PR.
+#
+# Usage:
+# 1. Create an issue with a clear description of the feature/fix
+# 2. Add the 'claude-implement' label
+# 3. Claude will create a branch, implement, and open a PR
+#
+# The issue description should include:
+# - What needs to be implemented
+# - Expected behavior
+# - Any technical constraints or preferences
+
+name: Claude Auto-Implement
+
+on:
+  issues:
+    types: [labeled]
+
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to implement'
+        required: true
+        type: number
+      branch_prefix:
+        description: 'Branch prefix (default: feat)'
+        required: false
+        default: 'feat'
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write  # Required for anthropics/claude-code-action OIDC
+
+# Concurrency: One implementation per issue
+concurrency:
+  group: claude-implement-issue-${{ github.event.issue.number || github.event.inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  check-trigger:
+    name: Check Implementation Trigger
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'issues' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'claude-implement')
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      issue_number: ${{ steps.check.outputs.issue_number }}
+      issue_title: ${{ steps.check.outputs.issue_title }}
+      issue_body: ${{ steps.check.outputs.issue_body }}
+      branch_name: ${{ steps.check.outputs.branch_name }}
+
+    steps:
+      - name: Check permissions and gather context
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isWorkflowDispatch = context.eventName === 'workflow_dispatch';
+            let issueNumber;
+
+            if (isWorkflowDispatch) {
+              issueNumber = parseInt('${{ github.event.inputs.issue_number }}');
+            } else {
+              issueNumber = context.payload.issue.number;
+
+              // Verify the user who added the label has permissions
+              const labelAdder = context.actor;
+              const { data: permData } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: labelAdder
+              });
+
+              if (!['admin', 'write'].includes(permData.permission)) {
+                console.log(`User ${labelAdder} lacks permission to trigger implementation`);
+                core.setOutput('should_run', 'false');
+                return;
+              }
+            }
+
+            // Get issue details
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber
+            });
+
+            // Generate branch name
+            const prefix = '${{ github.event.inputs.branch_prefix }}' || 'feat';
+            const sanitizedTitle = issue.title
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/^-|-$/g, '')
+              .substring(0, 40);
+            const branchName = `${prefix}/issue-${issueNumber}-${sanitizedTitle}`;
+
+            core.setOutput('should_run', 'true');
+            core.setOutput('issue_number', issueNumber);
+            core.setOutput('issue_title', issue.title);
+            core.setOutput('issue_body', issue.body || '');
+            core.setOutput('branch_name', branchName);
+
+            console.log(`Will implement issue #${issueNumber}: ${issue.title}`);
+            console.log(`Branch: ${branchName}`);
+
+  implement:
+    name: Implement Feature
+    runs-on: ubuntu-latest
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true'
+    env:
+      ISSUE_NUMBER: ${{ needs.check-trigger.outputs.issue_number }}
+      ISSUE_TITLE: ${{ needs.check-trigger.outputs.issue_title }}
+      ISSUE_BODY: ${{ needs.check-trigger.outputs.issue_body }}
+      BRANCH_NAME: ${{ needs.check-trigger.outputs.branch_name }}
+
+    steps:
+      - name: Check for API key
+        id: check-key
+        run: |
+          if [ -z "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
+            echo "::error::ANTHROPIC_API_KEY not configured"
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Create feature branch
+        run: |
+          git config user.name "Claude Code Bot"
+          git config user.email "claude-code-bot@users.noreply.github.com"
+
+          # Create and checkout the feature branch
+          git checkout -b "$BRANCH_NAME"
+          git push -u origin "$BRANCH_NAME"
+
+      - name: Post starting comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = parseInt(process.env.ISSUE_NUMBER);
+            const branchName = process.env.BRANCH_NAME;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: [
+                '## Claude Code Implementation Started',
+                '',
+                `I'm working on implementing this issue on branch \`${branchName}\`.`,
+                '',
+                'I will:',
+                '1. Analyze the requirements',
+                '2. Write tests first (TDD approach)',
+                '3. Implement the feature',
+                '4. Create a PR when complete',
+                '',
+                '_This may take a few minutes..._'
+              ].join('\n')
+            });
+
+      - name: Run Claude Code Implementation
+        id: implement
+        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          prompt: |
+            Implement the feature described in GitHub Issue #${{ env.ISSUE_NUMBER }}.
+
+            ## Issue Title
+            ${{ env.ISSUE_TITLE }}
+
+            ## Issue Description
+            ${{ env.ISSUE_BODY }}
+
+            ## Implementation Instructions
+
+            1. **Understand the Requirements**
+               - Read the issue description carefully
+               - Identify what needs to be built/changed
+               - Note any specific technical requirements
+
+            2. **Explore the Codebase**
+               - Look at existing code structure and patterns
+               - Find related files and understand the architecture
+               - Identify where changes should be made
+
+            3. **Write Tests First (TDD)**
+               - Create test files for the new functionality
+               - Write failing tests that describe expected behavior
+               - This helps ensure implementation meets requirements
+
+            4. **Implement the Feature**
+               - Write the actual implementation code
+               - Follow existing code style and patterns
+               - Make minimal, focused changes
+
+            5. **Verify**
+               - Run tests if a test command exists
+               - Ensure the implementation is complete
+
+            6. **Commit Changes**
+               - Stage all changes
+               - Create a meaningful commit message using conventional commits:
+                 - feat: for new features
+                 - fix: for bug fixes
+                 - refactor: for code changes that neither fix nor add
+               - Reference the issue: "Closes #${{ env.ISSUE_NUMBER }}"
+
+            ## Important Notes
+            - If the issue is unclear, implement the most reasonable interpretation
+            - If a test runner is available (npm test, pytest, etc.), run tests
+            - Follow existing code patterns and style
+            - Do NOT push changes - I will handle that
+
+          claude_args: |
+            --max-turns 100
+            --model claude-opus-4-5-20251101
+
+      - name: Push changes
+        id: push
+        run: |
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "No changes were made"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            # Push any uncommitted changes
+            if ! git diff --cached --quiet; then
+              git commit -m "feat: implement issue #$ISSUE_NUMBER
+
+            Closes #$ISSUE_NUMBER"
+            fi
+
+            # Push with retry
+            for i in 1 2 3 4; do
+              if git push origin "$BRANCH_NAME"; then
+                echo "Push successful"
+                echo "has_changes=true" >> $GITHUB_OUTPUT
+                break
+              else
+                if [ $i -lt 4 ]; then
+                  DELAY=$((2 ** i))
+                  echo "Push failed, retrying in ${DELAY}s..."
+                  sleep $DELAY
+                else
+                  echo "Push failed after 4 attempts"
+                  exit 1
+                fi
+              fi
+            done
+          fi
+
+      - name: Create Pull Request
+        if: steps.push.outputs.has_changes == 'true'
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          PR_URL=$(gh pr create \
+            --title "feat: $ISSUE_TITLE" \
+            --body "$(cat <<'EOF'
+          ## Summary
+
+          This PR implements issue #${{ env.ISSUE_NUMBER }}.
+
+          ## Changes
+
+          Implemented by Claude Code based on the issue description.
+
+          ## Related Issue
+
+          Closes #${{ env.ISSUE_NUMBER }}
+
+          ## Test Plan
+
+          - [ ] Review the implementation
+          - [ ] Run tests locally
+          - [ ] Verify functionality matches issue requirements
+
+          ---
+          *This PR was automatically created by Claude Code Auto-Implement*
+          EOF
+          )" \
+            --base main \
+            --head "$BRANCH_NAME")
+
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "Created PR: $PR_URL"
+
+      - name: Post completion comment
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          HAS_CHANGES: ${{ steps.push.outputs.has_changes }}
+          PR_URL: ${{ steps.create-pr.outputs.pr_url }}
+          JOB_STATUS: ${{ job.status }}
+        with:
+          script: |
+            const issueNumber = parseInt(process.env.ISSUE_NUMBER);
+            const hasChanges = process.env.HAS_CHANGES === 'true';
+            const prUrl = process.env.PR_URL;
+            const jobStatus = process.env.JOB_STATUS;
+
+            let body;
+
+            if (jobStatus === 'success' && hasChanges && prUrl) {
+              body = [
+                '## Implementation Complete',
+                '',
+                `I've created a pull request with the implementation: ${prUrl}`,
+                '',
+                'Please review the changes and merge when ready.',
+                '',
+                '*The PR will be automatically reviewed by Gemini.*'
+              ].join('\n');
+            } else if (jobStatus === 'success' && !hasChanges) {
+              body = [
+                '## No Changes Made',
+                '',
+                'I analyzed this issue but determined no code changes were needed.',
+                '',
+                'Possible reasons:',
+                '- The feature may already be implemented',
+                '- The issue description may need clarification',
+                '- The request may not be actionable',
+                '',
+                'Please provide more details if implementation is still needed.'
+              ].join('\n');
+            } else {
+              const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+              body = [
+                '## Implementation Failed',
+                '',
+                `The implementation encountered an error. Please check the [workflow run](${runUrl}) for details.`,
+                '',
+                'You can retry by:',
+                '1. Removing and re-adding the `claude-implement` label',
+                '2. Using workflow_dispatch with the issue number',
+                '',
+                'If the issue persists, manual implementation may be required.'
+              ].join('\n');
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body
+            });

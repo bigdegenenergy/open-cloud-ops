@@ -1,0 +1,403 @@
+# Claude Research & Implement Pipeline
+#
+# Two-phase workflow for complex features:
+# 1. Research phase: Analyze codebase and create implementation plan
+# 2. Implement phase: Execute the plan (triggered manually after review)
+#
+# Usage:
+# - Comment "@claude research [topic]" to start research
+# - Review the research output
+# - Comment "@claude implement plan" to proceed with implementation
+#
+# This prevents wasted effort on implementations that don't align with expectations.
+
+name: Claude Research & Implement
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write  # Required for anthropics/claude-code-action OIDC
+
+# Concurrency: One research/implement per issue
+concurrency:
+  group: claude-research-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  # Phase 1: Research
+  research:
+    name: Research Phase
+    runs-on: ubuntu-latest
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude research') &&
+      github.event.comment.user.type != 'Bot' &&
+      !contains(github.event.comment.user.login, '[bot]')
+    outputs:
+      completed: ${{ steps.research.outputs.completed }}
+
+    steps:
+      - name: Check permissions
+        id: check-perms
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const authorAssociation = context.payload.comment.author_association;
+            const allowedAssociations = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+            if (!allowedAssociations.includes(authorAssociation)) {
+              core.setOutput('has_access', 'false');
+              console.log(`Access denied: ${context.actor} has association '${authorAssociation}'`);
+              return;
+            }
+            core.setOutput('has_access', 'true');
+
+      - name: Checkout code
+        if: steps.check-perms.outputs.has_access == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract research topic
+        if: steps.check-perms.outputs.has_access == 'true'
+        id: topic
+        env:
+          # SECURITY: Pass user input via env var to prevent script injection.
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Extract everything after "@claude research"
+          TOPIC=$(echo "$COMMENT_BODY" | sed -n 's/.*@claude research[[:space:]]*//p')
+          echo "topic=$TOPIC" >> $GITHUB_OUTPUT
+
+      - name: Post research starting
+        if: steps.check-perms.outputs.has_access == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: [
+                '## Research Phase Starting',
+                '',
+                'I\'m analyzing the codebase to create an implementation plan.',
+                '',
+                '_This may take a few minutes..._'
+              ].join('\n')
+            });
+
+      - name: Run Claude Research
+        if: steps.check-perms.outputs.has_access == 'true'
+        id: research
+        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          prompt: |
+            Perform thorough research on the following topic:
+
+            ## Research Topic
+            ${{ steps.topic.outputs.topic }}
+
+            ## Research Process
+
+            1. **Understand the Request**
+               - Parse the research question/topic
+               - Identify what is being asked
+               - Note any constraints mentioned
+
+            2. **Explore the Codebase**
+               - Find relevant files and modules
+               - Understand current architecture
+               - Identify patterns and conventions
+               - Map dependencies between components
+
+            3. **Analyze Affected Areas**
+               - List files that would need changes
+               - Identify potential breaking changes
+               - Note integration points
+               - Consider test coverage
+
+            4. **Evaluate Options**
+               - Consider multiple approaches
+               - Weigh pros/cons of each
+               - Consider maintainability, performance, complexity
+               - Research best practices
+
+            5. **Risk Assessment**
+               - Identify potential risks
+               - Consider edge cases
+               - Note security considerations
+
+            ## Output Format
+
+            Post a structured research summary as a PR comment with:
+
+            ```
+            ## Research Summary
+
+            ### Topic
+            [What was researched]
+
+            ### Current Architecture
+            [How the relevant parts of the system work]
+
+            ### Key Files Affected
+            - `path/file.ts` - [Why affected]
+            - ...
+
+            ### Implementation Options
+
+            #### Option 1: [Name]
+            - **Approach**: [Description]
+            - **Pros**: [List]
+            - **Cons**: [List]
+            - **Effort**: Low/Medium/High
+
+            #### Option 2: [Name]
+            [Same structure]
+
+            ### Recommended Approach
+            [Which option and why]
+
+            ### Implementation Plan
+            1. [Step 1]
+            2. [Step 2]
+            3. ...
+
+            ### Risks
+            - [Risk]: [Mitigation]
+
+            ### Questions
+            - [Any clarifying questions]
+
+            ---
+            To proceed with implementation, reply with `@claude implement plan`
+            ```
+
+            DO NOT make any code changes. This is research only.
+
+          claude_args: |
+            --max-turns 30
+            --model claude-opus-4-5-20251101
+
+  # Phase 2: Implementation
+  implement:
+    name: Implementation Phase
+    runs-on: ubuntu-latest
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude implement plan') &&
+      github.event.comment.user.type != 'Bot' &&
+      !contains(github.event.comment.user.login, '[bot]')
+
+    steps:
+      - name: Check permissions
+        id: check-perms
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const authorAssociation = context.payload.comment.author_association;
+            const allowedAssociations = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+            if (!allowedAssociations.includes(authorAssociation)) {
+              core.setOutput('has_access', 'false');
+              return;
+            }
+            core.setOutput('has_access', 'true');
+
+            // Get PR head ref (github.head_ref is undefined for issue_comment events)
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number
+            });
+            core.setOutput('head_ref', pr.head.ref);
+
+            // Get recent comments to find the research summary
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              per_page: 30
+            });
+
+            // Find the most recent research summary from a trusted source
+            // SECURITY: Only accept plans from:
+            // 1. Bot accounts (github-actions[bot], claude-code-action)
+            // 2. Users with maintainer/admin permissions
+            const trustedAssociations = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            const researchComment = comments.reverse().find(c => {
+              if (!c.body || !c.body.includes('## Research Summary')) {
+                return false;
+              }
+              // Trust bot accounts (these are from the research phase)
+              if (c.user.type === 'Bot' || c.user.login.includes('[bot]')) {
+                return true;
+              }
+              // Trust maintainers/admins who might manually post a plan
+              if (trustedAssociations.includes(c.author_association)) {
+                return true;
+              }
+              console.log(`Skipping research summary from untrusted user: ${c.user.login} (${c.author_association})`);
+              return false;
+            });
+
+            if (researchComment) {
+              core.setOutput('has_plan', 'true');
+              // Store just the implementation plan section
+              const planMatch = researchComment.body.match(/### Implementation Plan[\s\S]*?(?=###|$)/);
+              core.setOutput('plan', planMatch ? planMatch[0] : researchComment.body);
+            } else {
+              core.setOutput('has_plan', 'false');
+            }
+
+      - name: No plan found
+        if: steps.check-perms.outputs.has_plan == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: [
+                '## No Research Plan Found',
+                '',
+                'I could not find a research summary to implement.',
+                '',
+                'Please run `@claude research [topic]` first to create an implementation plan.'
+              ].join('\n')
+            });
+            core.setFailed('No research plan found');
+
+      - name: Checkout code
+        if: steps.check-perms.outputs.has_access == 'true' && steps.check-perms.outputs.has_plan == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.check-perms.outputs.head_ref }}
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Post implementation starting
+        if: steps.check-perms.outputs.has_access == 'true' && steps.check-perms.outputs.has_plan == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: [
+                '## Implementation Phase Starting',
+                '',
+                'I\'m now implementing the research plan.',
+                '',
+                '_This may take several minutes..._'
+              ].join('\n')
+            });
+
+      - name: Run Claude Implementation
+        if: steps.check-perms.outputs.has_access == 'true' && steps.check-perms.outputs.has_plan == 'true'
+        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          prompt: |
+            Execute the following implementation plan that was created during the research phase:
+
+            ## Implementation Plan
+            ${{ steps.check-perms.outputs.plan }}
+
+            ## Instructions
+
+            1. Follow the implementation plan step by step
+            2. Write tests first (TDD) when appropriate
+            3. Make minimal, focused changes
+            4. Follow existing code patterns
+            5. Commit changes with clear messages
+
+            ## Important
+            - The plan was reviewed and approved by the user
+            - Implement ALL steps in the plan
+            - If something is unclear, make reasonable assumptions
+            - Focus on correctness and maintainability
+
+          # Use Haiku for implementation since the plan is already approved
+          # The heavy cognitive work (research/planning) was done by Opus
+          claude_args: |
+            --max-turns 75
+            --model claude-haiku-4-5-20251001
+
+      - name: Configure git and push
+        if: steps.check-perms.outputs.has_access == 'true' && steps.check-perms.outputs.has_plan == 'true'
+        env:
+          HEAD_REF: ${{ steps.check-perms.outputs.head_ref }}
+        run: |
+          git config user.name "Claude Code Bot"
+          git config user.email "claude-code-bot@users.noreply.github.com"
+
+          git add -A
+          if ! git diff --staged --quiet; then
+            git commit -m "feat: implement research plan
+
+            Implemented based on research and review discussion."
+
+            for i in 1 2 3 4; do
+              if git push origin "HEAD:$HEAD_REF"; then
+                echo "Push successful"
+                break
+              else
+                if [ $i -lt 4 ]; then
+                  DELAY=$((2 ** i))
+                  echo "Retrying in ${DELAY}s..."
+                  sleep $DELAY
+                else
+                  echo "Push failed"
+                  exit 1
+                fi
+              fi
+            done
+          else
+            echo "No changes to commit"
+          fi
+
+      - name: Post completion
+        if: always() && steps.check-perms.outputs.has_access == 'true' && steps.check-perms.outputs.has_plan == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}';
+
+            let body;
+            if (status === 'success') {
+              body = [
+                '## Implementation Complete',
+                '',
+                'Changes have been pushed to this PR.',
+                '',
+                'Please review the changes and request any adjustments needed.'
+              ].join('\n');
+            } else {
+              const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+              body = [
+                '## Implementation Failed',
+                '',
+                `The implementation encountered an error. Check the [workflow run](${runUrl}).`,
+                '',
+                'You may need to implement manually or provide more specific instructions.'
+              ].join('\n');
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body
+            });

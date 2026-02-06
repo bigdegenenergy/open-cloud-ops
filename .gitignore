@@ -46,6 +46,9 @@ Thumbs.db
 /build/
 /out/
 
+# Temporary directories
+tmp/
+
 # Logs
 *.log
 logs/
@@ -70,3 +73,21 @@ coverage/
 htmlcov/
 .coverage
 *.cover
+
+# AI Dev Toolkit local configuration
+# These files contain LOCAL-ONLY data and should never be committed:
+
+# User's notification webhook URLs (contains personal service tokens)
+.claude/notifications.json
+
+# Generated analysis artifacts (temporary files)
+.claude/artifacts/
+
+# Local performance metrics (machine-specific)
+.claude/metrics/
+
+# Generated review artifacts (pushed to PR branches by CI, never merged)
+REVIEW_INSTRUCTIONS.md
+
+# Backup files created during hook installation
+*.backup.*
