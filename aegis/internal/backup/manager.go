@@ -41,12 +41,13 @@ type KubeClient interface {
 // BackupManager orchestrates backup operations including job management,
 // execution, scheduling, and retention enforcement.
 type BackupManager struct {
-	kubeClient    KubeClient
-	storage       StorageBackend
-	store         BackupStore // Optional DB persistence (write-through cache)
-	storagePath   string
-	retentionDays int
-	encryptionKey []byte // Optional AES-256 key for encrypting archives at rest
+	kubeClient         KubeClient
+	storage            StorageBackend
+	store              BackupStore // Optional DB persistence (write-through cache)
+	storagePath        string
+	retentionDays      int
+	encryptionKey      []byte // Optional AES-256 key for encrypting archives at rest
+	encryptionRequired bool   // Fail-closed: if true, backups fail when no key is set
 
 	mu      sync.RWMutex
 	jobs    map[string]*models.BackupJob
@@ -74,6 +75,15 @@ func NewBackupManager(kubeClient KubeClient, storage StorageBackend, storagePath
 		} else {
 			m.encryptionKey = key
 			log.Printf("backup: AES-CTR+HMAC-SHA256 encryption enabled for archives")
+		}
+	}
+
+	// Fail-closed: when AEGIS_ENCRYPTION_REQUIRED=true, refuse to run
+	// backups without a valid encryption key.
+	if strings.EqualFold(os.Getenv("AEGIS_ENCRYPTION_REQUIRED"), "true") {
+		m.encryptionRequired = true
+		if m.encryptionKey == nil {
+			log.Printf("backup: WARNING: AEGIS_ENCRYPTION_REQUIRED=true but no valid encryption key configured")
 		}
 	}
 
@@ -279,6 +289,17 @@ func (m *BackupManager) ExecuteBackup(ctx context.Context, jobID string) (*model
 	defer os.Remove(archivePath)
 
 	manifest.Checksum = checksum
+
+	// Fail-closed: refuse to store unencrypted backups when encryption is required
+	if m.encryptionRequired && m.encryptionKey == nil {
+		completedAt := time.Now().UTC()
+		record.Status = models.RecordStatusFailed
+		record.ErrorMessage = "encryption required but no valid key configured (AEGIS_ENCRYPTION_REQUIRED=true)"
+		record.CompletedAt = &completedAt
+		record.DurationMs = completedAt.Sub(record.StartedAt).Milliseconds()
+		os.Remove(archivePath)
+		return record, fmt.Errorf("backup: %s", record.ErrorMessage)
+	}
 
 	// Encrypt archive at rest if an encryption key is configured
 	if m.encryptionKey != nil {

@@ -8,6 +8,7 @@ and Compute Optimizer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any
@@ -41,7 +42,32 @@ class AWSProvider(CloudProvider):
         start_date: date,
         end_date: date,
     ) -> list[dict[str, Any]]:
-        """Pull cost data from AWS Cost Explorer."""
+        """Pull cost data from AWS Cost Explorer.
+
+        Runs boto3 calls in a thread executor to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(self._get_costs_sync, start_date, end_date)
+
+    async def get_resources(self) -> list[dict[str, Any]]:
+        """List active EC2 instances, RDS instances, and S3 buckets.
+
+        Runs boto3 calls in a thread executor to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(self._get_resources_sync)
+
+    async def get_recommendations(self) -> list[dict[str, Any]]:
+        """Fetch AWS optimization recommendations.
+
+        Runs boto3 calls in a thread executor to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(self._get_recommendations_sync)
+
+    def _get_costs_sync(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        """Synchronous cost collection from AWS Cost Explorer."""
         try:
             ce = self._session.client("ce", region_name=self._settings.aws_region)
 
@@ -110,8 +136,8 @@ class AWSProvider(CloudProvider):
             logger.error("Failed to fetch AWS costs: %s", exc)
             return []
 
-    async def get_resources(self) -> list[dict[str, Any]]:
-        """List active EC2 instances, RDS instances, and S3 buckets."""
+    def _get_resources_sync(self) -> list[dict[str, Any]]:
+        """Synchronous resource discovery."""
         resources: list[dict[str, Any]] = []
 
         resources.extend(self._list_ec2_instances())
@@ -121,8 +147,8 @@ class AWSProvider(CloudProvider):
         logger.info("Discovered %d AWS resources", len(resources))
         return resources
 
-    async def get_recommendations(self) -> list[dict[str, Any]]:
-        """Fetch AWS optimization recommendations."""
+    def _get_recommendations_sync(self) -> list[dict[str, Any]]:
+        """Synchronous recommendation fetching."""
         recommendations: list[dict[str, Any]] = []
 
         recommendations.extend(self._get_ce_recommendations())

@@ -281,6 +281,109 @@ SELECT create_hypertable('api_requests', 'time', if_not_exists => TRUE);
 SELECT create_hypertable('cloud_costs', 'time', if_not_exists => TRUE);
 
 -- =============================================================================
+-- TimescaleDB Continuous Aggregates (pre-computed rollups for analytics)
+-- =============================================================================
+
+-- Hourly API request summaries for Cerebra analytics dashboards
+CREATE MATERIALIZED VIEW IF NOT EXISTS api_requests_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', time) AS bucket,
+    provider,
+    model,
+    organization_id,
+    team_id,
+    COUNT(*)                    AS request_count,
+    SUM(input_tokens)           AS total_input_tokens,
+    SUM(output_tokens)          AS total_output_tokens,
+    SUM(total_tokens)           AS total_tokens,
+    SUM(cost_cents)             AS total_cost_cents,
+    AVG(latency_ms)             AS avg_latency_ms,
+    MAX(latency_ms)             AS max_latency_ms,
+    COUNT(*) FILTER (WHERE status_code >= 400) AS error_count
+FROM api_requests
+GROUP BY bucket, provider, model, organization_id, team_id
+WITH NO DATA;
+
+-- Daily API request summaries for long-range reporting
+CREATE MATERIALIZED VIEW IF NOT EXISTS api_requests_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', time) AS bucket,
+    provider,
+    model,
+    organization_id,
+    team_id,
+    COUNT(*)                    AS request_count,
+    SUM(input_tokens)           AS total_input_tokens,
+    SUM(output_tokens)          AS total_output_tokens,
+    SUM(total_tokens)           AS total_tokens,
+    SUM(cost_cents)             AS total_cost_cents,
+    AVG(latency_ms)             AS avg_latency_ms,
+    MAX(latency_ms)             AS max_latency_ms,
+    COUNT(*) FILTER (WHERE status_code >= 400) AS error_count
+FROM api_requests
+GROUP BY bucket, provider, model, organization_id, team_id
+WITH NO DATA;
+
+-- Hourly cloud cost summaries for Economist dashboards
+CREATE MATERIALIZED VIEW IF NOT EXISTS cloud_costs_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', time) AS bucket,
+    provider,
+    account_id,
+    service,
+    region,
+    SUM(cost_amount)            AS total_cost,
+    SUM(usage_quantity)         AS total_usage,
+    COUNT(*)                    AS record_count
+FROM cloud_costs
+GROUP BY bucket, provider, account_id, service, region
+WITH NO DATA;
+
+-- Daily cloud cost summaries for long-range FinOps reporting
+CREATE MATERIALIZED VIEW IF NOT EXISTS cloud_costs_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', time) AS bucket,
+    provider,
+    account_id,
+    service,
+    region,
+    SUM(cost_amount)            AS total_cost,
+    SUM(usage_quantity)         AS total_usage,
+    COUNT(*)                    AS record_count
+FROM cloud_costs
+GROUP BY bucket, provider, account_id, service, region
+WITH NO DATA;
+
+-- Refresh policies: keep aggregates up to date automatically
+SELECT add_continuous_aggregate_policy('api_requests_hourly',
+    start_offset    => INTERVAL '3 hours',
+    end_offset      => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour',
+    if_not_exists   => TRUE);
+
+SELECT add_continuous_aggregate_policy('api_requests_daily',
+    start_offset    => INTERVAL '3 days',
+    end_offset      => INTERVAL '1 day',
+    schedule_interval => INTERVAL '1 day',
+    if_not_exists   => TRUE);
+
+SELECT add_continuous_aggregate_policy('cloud_costs_hourly',
+    start_offset    => INTERVAL '3 hours',
+    end_offset      => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour',
+    if_not_exists   => TRUE);
+
+SELECT add_continuous_aggregate_policy('cloud_costs_daily',
+    start_offset    => INTERVAL '3 days',
+    end_offset      => INTERVAL '1 day',
+    schedule_interval => INTERVAL '1 day',
+    if_not_exists   => TRUE);
+
+-- =============================================================================
 -- Indexes for Common Query Patterns
 -- =============================================================================
 

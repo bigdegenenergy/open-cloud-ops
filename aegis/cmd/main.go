@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -185,6 +186,15 @@ func runBackupScheduler(ctx context.Context, mgr *backup.BackupManager) {
 			}
 
 			for _, job := range dueJobs {
+				// Add random jitter (0-5s) to prevent thundering herd when
+				// multiple backup jobs become due at the same tick.
+				jitter := time.Duration(rand.Intn(5000)) * time.Millisecond
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(jitter):
+				}
+
 				log.Printf("Scheduler: executing due backup job %s (%s)", job.ID, job.Name)
 				if _, err := mgr.ExecuteBackup(ctx, job.ID); err != nil {
 					log.Printf("Scheduler: failed to execute job %s: %v", job.ID, err)

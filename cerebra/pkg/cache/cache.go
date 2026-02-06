@@ -153,24 +153,30 @@ func (c *Cache) SetBudgetSpend(ctx context.Context, scope, entityID string, amou
 	return nil
 }
 
-// RateLimitCheck performs a sliding window rate limit check for a given key.
+// rateLimitLua atomically increments the counter and sets TTL only on the first
+// request in the window. This prevents the TTL from being extended by subsequent
+// requests, which would cause callers to be blocked longer than the intended window.
+var rateLimitLua = redis.NewScript(`
+	local count = redis.call('INCR', KEYS[1])
+	if count == 1 then
+		redis.call('EXPIRE', KEYS[1], ARGV[1])
+	end
+	return count
+`)
+
+// RateLimitCheck performs a fixed-window rate limit check for a given key.
 // It returns true if the request is allowed (under limit), false if rate-limited.
-// The window is defined by the TTL and maxRequests is the limit within that window.
+// The window TTL is set once on the first request and not extended by subsequent ones.
 func (c *Cache) RateLimitCheck(ctx context.Context, key string, maxRequests int64, window time.Duration) (bool, error) {
 	rateLimitKey := fmt.Sprintf("ratelimit:%s", key)
+	windowSeconds := int(window / time.Second)
 
-	// Use a pipeline for atomic increment + expire
-	pipe := c.client.Pipeline()
-	incrCmd := pipe.Incr(ctx, rateLimitKey)
-	pipe.Expire(ctx, rateLimitKey, window)
-
-	_, err := pipe.Exec(ctx)
+	result, err := rateLimitLua.Run(ctx, c.client, []string{rateLimitKey}, windowSeconds).Int64()
 	if err != nil {
 		return false, fmt.Errorf("cache: rate limit check: %w", err)
 	}
 
-	count := incrCmd.Val()
-	return count <= maxRequests, nil
+	return result <= maxRequests, nil
 }
 
 // Client returns the underlying Redis client for advanced operations.
