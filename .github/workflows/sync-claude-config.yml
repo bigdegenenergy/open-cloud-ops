@@ -1,0 +1,449 @@
+# Claude Code Configuration Sync
+#
+# This workflow pulls the latest Claude Code configuration from
+# bigdegenenergy/ai-dev-toolkit on a daily schedule.
+#
+# SETUP:
+# 1. Copy this file to your repo's .github/workflows/ directory
+# 2. Add GH_TOKEN secret (Personal Access Token with 'repo' scope)
+#    - Required for private repos
+#    - Recommended for all repos: PRs created with GITHUB_TOKEN won't trigger CI
+# 3. Push to enable the workflow
+#
+# The workflow will:
+# - Run every day at 9:00 AM UTC
+# - Sync .claude/, docs/, and tools/ directories from the source repo
+# - Create a PR if changes are detected
+#
+# IMPORTANT - CI Workflows:
+# PRs created using the default GITHUB_TOKEN do NOT trigger 'on: pull_request'
+# workflows. To ensure CI runs on sync PRs, you must:
+#   Option A: Add a GH_TOKEN secret (PAT with 'repo' scope) - RECOMMENDED
+#   Option B: Manually close and reopen the PR to trigger CI
+#   Option C: Push an empty commit to the PR branch
+#
+# SECURITY NOTE:
+# This workflow syncs executable hooks and configuration from an external repo.
+# Always review the generated PR before merging. The .github/workflows sync
+# option is disabled by default for security reasons.
+#
+# BRANCH PROTECTION (Recommended):
+# Set up branch protection on your main branch to ensure sync PRs are reviewed:
+#   1. Go to Settings > Branches > Add branch protection rule
+#   2. Branch name pattern: main (or master)
+#   3. Enable:
+#      - ✅ Require a pull request before merging
+#      - ✅ Require status checks to pass before merging
+#        - Add required checks: CI, secrets-scan, gitleaks, pii-scan
+#      - ✅ Require conversation resolution before merging
+#      - ✅ Do not allow bypassing the above settings (optional)
+#   4. Save changes
+#
+# This ensures automated sync PRs cannot be merged without review and passing CI.
+
+name: Sync Claude Config
+
+on:
+  schedule:
+    # Run every day at 9:00 AM UTC
+    - cron: '0 9 * * *'
+
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repository (owner/repo)'
+        required: false
+        default: 'bigdegenenergy/ai-dev-toolkit'
+        type: string
+      source_branch:
+        description: 'Source branch to sync from'
+        required: false
+        default: 'main'
+        type: string
+      sync_github_workflows:
+        description: 'Sync .github/workflows (enabled by default - review PR before merging)'
+        required: false
+        default: true
+        type: boolean
+      dry_run:
+        description: 'Dry run - show changes without creating PR'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  SOURCE_REPO: ${{ inputs.source_repo || 'bigdegenenergy/ai-dev-toolkit' }}
+  SOURCE_BRANCH: ${{ inputs.source_branch || 'main' }}
+
+jobs:
+  sync:
+    name: Sync Configuration
+    runs-on: ubuntu-latest
+
+    # Don't run on the source repo itself
+    if: github.repository != 'bigdegenenergy/ai-dev-toolkit'
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch source repo
+        run: |
+          echo "📥 Fetching latest from ${{ env.SOURCE_REPO }}..."
+
+          # Clone source repo to temp directory
+          git clone --depth 1 --branch ${{ env.SOURCE_BRANCH }} \
+            https://github.com/${{ env.SOURCE_REPO }}.git /tmp/claude-code-source
+
+          echo "✅ Source repo fetched successfully"
+
+      - name: Sync .claude directory
+        id: sync_claude
+        run: |
+          echo "🔄 Syncing .claude/ directory..."
+
+          # Create .claude directory if it doesn't exist
+          mkdir -p .claude
+
+          # Track if changes were made
+          CHANGES_MADE=false
+
+          # Sync .claude directory (excluding local config files)
+          if [ -d "/tmp/claude-code-source/.claude" ]; then
+            # Remove existing .claude contents (except local overrides)
+            # Preserve: notifications.json, local-settings.json, artifacts/
+
+            # Files to preserve (if they exist)
+            PRESERVE_FILES=""
+            [ -f ".claude/notifications.json" ] && cp .claude/notifications.json /tmp/notifications.json.bak && PRESERVE_FILES="$PRESERVE_FILES notifications.json"
+            [ -f ".claude/local-settings.json" ] && cp .claude/local-settings.json /tmp/local-settings.json.bak && PRESERVE_FILES="$PRESERVE_FILES local-settings.json"
+            [ -d ".claude/artifacts" ] && cp -r .claude/artifacts /tmp/artifacts.bak && PRESERVE_FILES="$PRESERVE_FILES artifacts/"
+
+            # Copy new .claude contents
+            rsync -av --delete \
+              --exclude 'notifications.json' \
+              --exclude 'local-settings.json' \
+              --exclude 'artifacts/' \
+              /tmp/claude-code-source/.claude/ .claude/
+
+            # Restore preserved files
+            [ -f "/tmp/notifications.json.bak" ] && mv /tmp/notifications.json.bak .claude/notifications.json
+            [ -f "/tmp/local-settings.json.bak" ] && mv /tmp/local-settings.json.bak .claude/local-settings.json
+            [ -d "/tmp/artifacts.bak" ] && mv /tmp/artifacts.bak .claude/artifacts
+
+            echo "✅ .claude/ directory synced"
+            echo "   Preserved local files: $PRESERVE_FILES"
+
+            # Check for changes
+            if ! git diff --quiet .claude/; then
+              CHANGES_MADE=true
+            fi
+
+            if ! git diff --quiet --cached .claude/; then
+              CHANGES_MADE=true
+            fi
+
+            # Check for untracked files
+            if [ -n "$(git ls-files --others --exclude-standard .claude/)" ]; then
+              CHANGES_MADE=true
+            fi
+          else
+            echo "⚠️ No .claude directory found in source repo"
+          fi
+
+          echo "changes_made=$CHANGES_MADE" >> $GITHUB_OUTPUT
+
+      - name: Sync .github/workflows
+        id: sync_workflows
+        if: inputs.sync_github_workflows != false
+        run: |
+          echo "🔄 Syncing .github/workflows/ directory..."
+          echo "   Review PR carefully before merging"
+          echo ""
+
+          CHANGES_MADE=false
+
+          if [ -d "/tmp/claude-code-source/.github/workflows" ]; then
+            mkdir -p .github/workflows
+            mkdir -p .github/scripts
+            mkdir -p .github/ISSUE_TEMPLATE
+
+            # Sync all workflow files
+            SYNC_WORKFLOWS=(
+              "ci.yml"
+              "security.yml"
+              "pii-scan-content.yml"
+              "gemini-pr-review-plus.yml"
+              "agent-reminder.yml"
+              "label-agent-prs.yml"
+              "notify-on-failure.yml"
+              "claude.yml"
+              "claude-auto-implement.yml"
+              "claude-code-implement.yml"
+              "claude-research-implement.yml"
+              "claude-security-review.yml"
+              "onefilellm.yml"
+              "sync-claude-config.yml"
+            )
+
+            for workflow in "${SYNC_WORKFLOWS[@]}"; do
+              if [ -f "/tmp/claude-code-source/.github/workflows/$workflow" ]; then
+                cp "/tmp/claude-code-source/.github/workflows/$workflow" ".github/workflows/$workflow"
+                echo "  Synced: $workflow"
+              fi
+            done
+
+            # Sync scripts directory
+            if [ -d "/tmp/claude-code-source/.github/scripts" ]; then
+              cp -R /tmp/claude-code-source/.github/scripts/* .github/scripts/ 2>/dev/null || true
+              echo "  Synced: scripts/"
+            fi
+
+            # Sync issue templates
+            if [ -d "/tmp/claude-code-source/.github/ISSUE_TEMPLATE" ]; then
+              cp -R /tmp/claude-code-source/.github/ISSUE_TEMPLATE/* .github/ISSUE_TEMPLATE/ 2>/dev/null || true
+              echo "  Synced: ISSUE_TEMPLATE/"
+            fi
+
+            # Sync PR template
+            if [ -f "/tmp/claude-code-source/.github/pull_request_template.md" ]; then
+              cp /tmp/claude-code-source/.github/pull_request_template.md .github/
+              echo "  Synced: pull_request_template.md"
+            fi
+
+            # Sync MCP config template
+            if [ -f "/tmp/claude-code-source/.github/mcp-config.json.template" ]; then
+              cp /tmp/claude-code-source/.github/mcp-config.json.template .github/
+              echo "  Synced: mcp-config.json.template"
+            fi
+
+            echo "✅ GitHub directory synced"
+
+            # Check for changes
+            if ! git diff --quiet .github/; then
+              CHANGES_MADE=true
+            fi
+          fi
+
+          echo "changes_made=$CHANGES_MADE" >> $GITHUB_OUTPUT
+
+      - name: Sync root config files
+        id: sync_root
+        run: |
+          echo "🔄 Syncing root configuration files..."
+
+          CHANGES_MADE=false
+
+          # NOTE: CLAUDE.md is NOT synced - each repo maintains its own project instructions
+
+          # Sync .mcp.json.template if it exists in source
+          if [ -f "/tmp/claude-code-source/.mcp.json.template" ]; then
+            cp /tmp/claude-code-source/.mcp.json.template ./.mcp.json.template
+            echo "  Synced: .mcp.json.template"
+          fi
+
+          # Check for changes
+          if ! git diff --quiet .mcp.json.template 2>/dev/null; then
+            CHANGES_MADE=true
+          fi
+
+          echo "changes_made=$CHANGES_MADE" >> $GITHUB_OUTPUT
+
+      - name: Sync docs directory
+        id: sync_docs
+        run: |
+          echo "🔄 Syncing docs/ directory..."
+
+          CHANGES_MADE=false
+
+          if [ -d "/tmp/claude-code-source/docs" ]; then
+            mkdir -p docs
+
+            # Copy documentation files (excluding generated content like onefilellm/)
+            for doc in /tmp/claude-code-source/docs/*.md; do
+              [ -f "$doc" ] || continue
+              cp "$doc" "docs/$(basename "$doc")"
+              echo "  Synced: docs/$(basename "$doc")"
+            done
+
+            # Check for changes
+            if ! git diff --quiet docs/ 2>/dev/null; then
+              CHANGES_MADE=true
+            fi
+          fi
+
+          echo "changes_made=$CHANGES_MADE" >> $GITHUB_OUTPUT
+
+      - name: Sync tools directory
+        id: sync_tools
+        run: |
+          echo "🔄 Syncing tools/ directory..."
+
+          CHANGES_MADE=false
+
+          if [ -d "/tmp/claude-code-source/tools" ]; then
+            mkdir -p tools
+
+            # Copy tools directories
+            for tool_dir in /tmp/claude-code-source/tools/*/; do
+              [ -d "$tool_dir" ] || continue
+              toolname=$(basename "$tool_dir")
+              cp -R "$tool_dir" "tools/"
+              echo "  Synced: tools/$toolname"
+            done
+
+            # Check for changes
+            if ! git diff --quiet tools/ 2>/dev/null; then
+              CHANGES_MADE=true
+            fi
+          fi
+
+          echo "changes_made=$CHANGES_MADE" >> $GITHUB_OUTPUT
+
+      - name: Get source repo version
+        id: version
+        run: |
+          cd /tmp/claude-code-source
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_DATE=$(git log -1 --format=%ci | cut -d' ' -f1)
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "commit_date=$COMMIT_DATE" >> $GITHUB_OUTPUT
+          echo "📌 Source version: $COMMIT_SHA ($COMMIT_DATE)"
+
+      - name: Check for changes
+        id: changes
+        run: |
+          # Stage all changes
+          git add -A
+
+          # Check if there are any staged changes
+          if git diff --cached --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "📭 No changes detected"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "📬 Changes detected:"
+            git diff --cached --stat
+          fi
+
+      - name: Show changes (dry run)
+        if: inputs.dry_run == true && steps.changes.outputs.has_changes == 'true'
+        run: |
+          echo "🔍 DRY RUN - Changes that would be applied:"
+          echo ""
+          git diff --cached --stat
+          echo ""
+          echo "Detailed diff:"
+          git diff --cached
+
+      - name: Create sync branch
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
+        id: branch
+        run: |
+          BRANCH_NAME="claude-config-sync/${{ steps.version.outputs.commit_date }}-${{ steps.version.outputs.commit_sha }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          # Create and checkout branch
+          git checkout -b "$BRANCH_NAME"
+
+          # Commit changes
+          git commit -m "chore: sync Claude Code config from ${{ env.SOURCE_REPO }}@${{ steps.version.outputs.commit_sha }}"
+
+          echo "✅ Created branch: $BRANCH_NAME"
+
+      - name: Push branch
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
+        run: |
+          git push -u origin "${{ steps.branch.outputs.branch_name }}"
+          echo "✅ Pushed branch to origin"
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          SOURCE_REPO: ${{ env.SOURCE_REPO }}
+          COMMIT_SHA: ${{ steps.version.outputs.commit_sha }}
+          COMMIT_DATE: ${{ steps.version.outputs.commit_date }}
+          SYNC_WORKFLOWS: ${{ inputs.sync_github_workflows }}
+        run: |
+          # Build PR body
+          WORKFLOW_LINE=""
+          if [ "$SYNC_WORKFLOWS" == "true" ]; then
+            WORKFLOW_LINE="- \`.github/workflows/\` (CI/CD workflows)"
+          fi
+
+          PR_BODY="## 🔄 Claude Code Configuration Sync
+
+          This PR syncs the latest Claude Code configuration from the upstream repository.
+
+          ### Source
+          - **Repository:** [${SOURCE_REPO}](https://github.com/${SOURCE_REPO})
+          - **Commit:** \`${COMMIT_SHA}\`
+          - **Date:** ${COMMIT_DATE}
+
+          ### Changes Synced
+          - \`.claude/\` directory (commands, hooks, agents, skills)
+          - \`.mcp.json.template\` (MCP server configuration)
+          - \`docs/\` directory (setup guides and references)
+          - \`tools/\` directory (utilities like onefilellm)
+          ${WORKFLOW_LINE}
+
+          **Note:** \`CLAUDE.md\` is NOT synced - each repo maintains its own project instructions.
+
+          ### ⚠️ CI Note
+          If this PR was created using the default GITHUB_TOKEN, CI workflows
+          may not have triggered automatically. To run CI:
+          - Close and reopen this PR, OR
+          - Push an empty commit: \`git commit --allow-empty -m \"trigger ci\"\`
+
+          ### Review Checklist
+          - [ ] Review changes for compatibility with this project
+          - [ ] Check for any project-specific customizations that may have been overwritten
+          - [ ] Verify hooks and commands work correctly
+          - [ ] Run tests to ensure nothing is broken
+
+          ### Local Files Preserved
+          The following local files were **not** overwritten:
+          - \`.claude/notifications.json\` (notification settings)
+          - \`.claude/local-settings.json\` (local overrides)
+          - \`.claude/artifacts/\` (generated artifacts)
+
+          ---
+          *This PR was automatically created by the [sync-claude-config](.github/workflows/sync-claude-config.yml) workflow.*"
+
+          gh pr create \
+            --title "chore: sync Claude Code config (${COMMIT_DATE})" \
+            --body "$PR_BODY" \
+            --label "automated,claude-code" \
+            --head "${{ steps.branch.outputs.branch_name }}" \
+            || echo "PR creation failed - may already exist or labels don't exist"
+
+          echo "✅ Pull request created"
+
+      - name: Summary
+        run: |
+          echo "## 📊 Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Repo | \`${{ env.SOURCE_REPO }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Commit | \`${{ steps.version.outputs.commit_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Changes Detected | ${{ steps.changes.outputs.has_changes }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry Run | ${{ inputs.dry_run || 'false' }} |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.changes.outputs.has_changes }}" == "true" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "| Branch Created | \`${{ steps.branch.outputs.branch_name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| PR Created | ✅ |" >> $GITHUB_STEP_SUMMARY
+          fi

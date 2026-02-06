@@ -1,0 +1,35 @@
+{
+  "_comment": "Copy this file to notifications.json and fill in your credentials. DO NOT commit the actual notifications.json file.",
+
+  "slack": {
+    "webhook_url": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  },
+
+  "telegram": {
+    "bot_token": "YOUR_BOT_TOKEN",
+    "chat_id": "YOUR_CHAT_ID"
+  },
+
+  "discord": {
+    "webhook_url": "https://discord.com/api/webhooks/YOUR/WEBHOOK"
+  },
+
+  "ntfy": {
+    "server": "https://ntfy.sh",
+    "topic": "your-topic-name",
+    "token": "optional-access-token"
+  },
+
+  "email": {
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "smtp_user": "your-email@gmail.com",
+    "smtp_password": "your-app-password",
+    "from_address": "your-email@gmail.com",
+    "to_address": "recipient@example.com"
+  },
+
+  "webhook": {
+    "url": "https://your-custom-webhook.com/endpoint"
+  }
+}

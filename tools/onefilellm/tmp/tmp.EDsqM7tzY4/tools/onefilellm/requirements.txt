@@ -1,0 +1,8 @@
+# OneFileLLM - install directly from GitHub
+# https://github.com/jimmc414/onefilellm
+#
+# Note: Package is not published to PyPI, so we install from source
+# SECURITY: Pinned to specific commit hash for supply chain security
+# To update: git ls-remote https://github.com/jimmc414/onefilellm.git HEAD
+
+onefilellm @ git+https://github.com/jimmc414/onefilellm.git@6c5de3c09f7d9245fc431b4ecf54c60f1e23cef3

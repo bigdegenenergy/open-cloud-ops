@@ -1,0 +1,197 @@
+name: PII Content Scanner
+
+# SECURITY: Trigger only on content-creation events, NOT on comments
+# to prevent recursive loops (workflow posts comment → triggers itself → infinite loop)
+on:
+  issues:
+    types: [opened, edited]
+  pull_request:
+    types: [opened, edited]
+  # REMOVED: issue_comment and pull_request_review_comment triggers
+  # These caused infinite loops when the workflow posted warning comments
+  workflow_dispatch:  # Allow manual re-runs
+
+jobs:
+  scan-content:
+    name: Scan for PII in Content
+    # Only run on public repositories (PII in private repos is less critical)
+    # Also skip bot actors to prevent any potential recursive triggers
+    if: github.event.repository.visibility == 'public' && !contains(github.actor, '[bot]')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Scan Issue/PR Content for PII
+        uses: actions/github-script@v7
+        env:
+          # Detect fork PRs - GITHUB_TOKEN has read-only permissions for fork PRs
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true }}
+        with:
+          script: |
+            // IMPORTANT: All PII patterns are CRITICAL because this is a public repo.
+            // Once in issue/PR history, data is permanently exposed.
+            const piiPatterns = {
+              // Email (excluding common test/example domains)
+              email: {
+                pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi,
+                excludes: /example\.com|test\.com|localhost|your-?email|user@|email@|foo@|bar@|noreply@|no-reply@|github\.com|users\.noreply\.github\.com/i,
+                severity: 'critical',
+                name: 'Email Address'
+              },
+              // Phone numbers
+              phone: {
+                pattern: /\+?1?[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}/g,
+                excludes: /555-|123-456|000-000/i,
+                severity: 'critical',
+                name: 'Phone Number'
+              },
+              // SSN
+              ssn: {
+                pattern: /\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b/g,
+                excludes: /000-00-0000|123-45-6789|xxx-xx-xxxx/i,
+                severity: 'critical',
+                name: 'Social Security Number'
+              },
+              // Credit card
+              creditCard: {
+                pattern: /\b[3-6][0-9]{3}[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}\b/g,
+                excludes: /0000[-\s]?0000[-\s]?0000[-\s]?0000|1234[-\s]?5678|xxxx/i,
+                severity: 'critical',
+                name: 'Credit Card Number'
+              },
+              // AWS Access Key
+              awsKey: {
+                pattern: /\b(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/g,
+                excludes: null,
+                severity: 'critical',
+                name: 'AWS Access Key'
+              },
+              // Private keys
+              privateKey: {
+                pattern: /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/g,
+                excludes: null,
+                severity: 'critical',
+                name: 'Private Key'
+              },
+              // API keys/tokens (generic patterns)
+              apiKey: {
+                pattern: /\b(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|bearer)\s*[:=]\s*['"]?[a-zA-Z0-9_-]{20,}['"]?/gi,
+                excludes: /your[_-]?api[_-]?key|example|placeholder|xxx/i,
+                severity: 'critical',
+                name: 'API Key/Token'
+              },
+              // Full names (in context like "name:", "author:", etc.)
+              fullName: {
+                pattern: /\b(name|author|user|contact|owner|created[_ ]?by|assigned[_ ]?to|submitted[_ ]?by)\s*[:=]?\s*[A-Z][a-z]+\s+[A-Z][a-z]+/gi,
+                excludes: /Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name/i,
+                severity: 'critical',
+                name: 'Full Name'
+              }
+            };
+
+            // Get content based on event type
+            // NOTE: Only scanning issues and PRs, not comments (to prevent recursive triggers)
+            let content = '';
+            let contentType = '';
+            let contentUrl = '';
+
+            if (context.eventName === 'issues') {
+              content = context.payload.issue.body || '';
+              contentType = 'issue';
+              contentUrl = context.payload.issue.html_url;
+            } else if (context.eventName === 'pull_request') {
+              content = context.payload.pull_request.body || '';
+              contentType = 'pull request';
+              contentUrl = context.payload.pull_request.html_url;
+            }
+            // REMOVED: issue_comment and pull_request_review_comment handlers
+            // These triggers were removed to prevent infinite loops when posting warnings
+
+            if (!content) {
+              console.log('No content to scan');
+              return;
+            }
+
+            console.log(`Scanning ${contentType} for PII...`);
+
+            const findings = [];
+
+            for (const [key, config] of Object.entries(piiPatterns)) {
+              const matches = content.match(config.pattern);
+              if (matches) {
+                // Filter out excluded patterns
+                const realMatches = matches.filter(match => {
+                  if (!config.excludes) return true;
+                  return !config.excludes.test(match);
+                });
+
+                if (realMatches.length > 0) {
+                  findings.push({
+                    type: config.name,
+                    severity: config.severity,
+                    count: realMatches.length,
+                    // Redact actual values for security
+                    samples: realMatches.slice(0, 2).map(m => m.substring(0, 4) + '***')
+                  });
+                }
+              }
+            }
+
+            if (findings.length === 0) {
+              console.log('✅ No PII detected');
+              return;
+            }
+
+            // Build warning message - ALL findings are critical for public repos
+            let message = `## ⛔ Personal Information Detected - Action Required\n\n`;
+            message += `This ${contentType} contains sensitive personal information that **must be removed**.\n\n`;
+            message += `This is a **PUBLIC repository** - any PII in issues/PRs is permanently exposed.\n\n`;
+
+            message += `### Detected PII:\n`;
+            for (const finding of findings) {
+              message += `- **${finding.type}**: ${finding.count} instance(s) found\n`;
+            }
+            message += `\n`;
+
+            message += `### Required Actions:\n`;
+            message += `1. **Edit this ${contentType}** to remove all personal information\n`;
+            message += `2. Use placeholders like \`user@example.com\` or \`John Doe\`\n`;
+            message += `3. For legitimate contacts, use GitHub usernames instead\n\n`;
+
+            message += `---\n`;
+            message += `*This is an automated scan. If this is a false positive, the patterns above may need updating.*`;
+
+            // Post comment (if we have permissions)
+            const issueNumber = context.issue?.number || context.payload.pull_request?.number;
+            const isForkPR = process.env.IS_FORK_PR === 'true';
+
+            // Build a safe summary that doesn't expose actual PII values
+            const safeSummary = findings.map(f => `${f.type}: ${f.count} instance(s)`).join(', ');
+
+            if (issueNumber) {
+              if (isForkPR) {
+                // For fork PRs, GITHUB_TOKEN has read-only permissions
+                // Log only the types detected, NOT the actual content or samples
+                console.log('::warning::Fork PR detected - cannot post comment due to read-only permissions');
+                console.log(`PII types detected: ${safeSummary}`);
+                console.log('The PR author must remove this PII before the PR can be merged.');
+              } else {
+                try {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                    body: message
+                  });
+                  console.log(`Posted PII alert on ${contentType} #${issueNumber}`);
+                } catch (err) {
+                  // Handle permission errors gracefully - don't log raw PII
+                  console.log(`::warning::Could not post comment: ${err.message}`);
+                  console.log(`PII types detected: ${safeSummary}`);
+                }
+              }
+            }
+
+            // Always fail when PII is found - this is a public repo
+            core.setFailed(`PII detected in ${contentType}: ${findings.map(f => f.type).join(', ')}`);

@@ -1,0 +1,78 @@
+{
+  "mcpServers": {
+    "_comment_fetch_security": "⚠️ SSRF RISK: 'fetch' allows arbitrary HTTP requests. See securityWarnings section below. Only enable in network-isolated environments.",
+    "fetch": {
+      "command": "npx",
+      "args": ["-y", "@anthropics/mcp-server-fetch@0.1.0"],
+      "description": "Fetch and read web pages, APIs, and documentation"
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search@0.6.2"],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      },
+      "description": "Web search via Brave Search API"
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GH_PAT}"
+      },
+      "description": "GitHub API access for issues, PRs, repos"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@2026.1.14", "/workspace"],
+      "description": "Extended filesystem operations"
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory@2025.11.25"],
+      "description": "Persistent memory across sessions"
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres@0.6.2"],
+      "env": {
+        "POSTGRES_CONNECTION_STRING": "${DATABASE_URL}"
+      },
+      "description": "PostgreSQL database access"
+    },
+    "slack": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-slack@2025.4.25"],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}"
+      },
+      "description": "Slack workspace access"
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer@2025.5.12"],
+      "description": "Browser automation for testing"
+    },
+    "sentry": {
+      "command": "npx",
+      "args": ["-y", "@sentry/mcp-server@0.28.0"],
+      "env": {
+        "SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}",
+        "SENTRY_ORG": "${SENTRY_ORG}"
+      },
+      "description": "Error tracking and monitoring"
+    }
+  },
+  "mcpServerNotes": {
+    "usage": "Copy this file to .github/mcp-config.json and replace ${...} with actual secrets",
+    "secrets": "Add secrets to GitHub repository settings",
+    "selective": "Remove servers you don't need to reduce attack surface",
+    "workflow": "Reference in claude-code-action using mcp_config input",
+    "versions": "Package versions are pinned to prevent supply chain attacks. Update periodically.",
+    "web-research": "For web research, use 'fetch' (no API key) or 'brave-search' (requires BRAVE_API_KEY)"
+  },
+  "securityWarnings": {
+    "fetch-ssrf-risk": "⚠️ SECURITY: The 'fetch' server allows arbitrary HTTP GET requests. In CI/CD environments or on developer machines with access to internal networks, this poses an SSRF (Server-Side Request Forgery) risk. A malicious or compromised prompt could cause the agent to access internal metadata services (e.g., cloud instance metadata at 169.254.169.254) or other internal network resources. MITIGATION: (1) Use network isolation for CI runners, (2) Consider removing this server if not needed, (3) Run in sandboxed environments only, (4) Be cautious with untrusted prompts.",
+    "general": "Always review MCP server capabilities before enabling them. Each server extends the agent's reach and should be evaluated for your security posture."
+  }
+}

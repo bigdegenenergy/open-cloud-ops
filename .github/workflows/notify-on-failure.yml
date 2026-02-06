@@ -1,0 +1,83 @@
+name: Notify on Failure
+
+on:
+  workflow_run:
+    workflows: ["CI", "Security Scan"]
+    types:
+      - completed
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'failure'
+    steps:
+      - name: Send Slack Notification
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "attachments": [{
+                "color": "#FF0000",
+                "title": "Workflow Failed: ${{ github.event.workflow_run.name }}",
+                "text": "Repository: ${{ github.repository }}\nBranch: ${{ github.event.workflow_run.head_branch }}",
+                "footer": "Claude Code CI"
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Send Telegram Notification
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              -d "parse_mode=Markdown" \
+              -d "text=🔴 *Workflow Failed*%0A%0A*Workflow:* ${{ github.event.workflow_run.name }}%0A*Repository:* ${{ github.repository }}%0A*Branch:* ${{ github.event.workflow_run.head_branch }}%0A%0A[View Run](${{ github.event.workflow_run.html_url }})"
+          fi
+
+      - name: Send Discord Notification
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d '{"embeds": [{"title": "Workflow Failed: ${{ github.event.workflow_run.name }}", "description": "Repository: ${{ github.repository }}\nBranch: ${{ github.event.workflow_run.head_branch }}", "color": 16711680, "url": "${{ github.event.workflow_run.html_url }}"}]}'
+          fi
+
+      - name: Send ntfy Notification
+        continue-on-error: true
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+        run: |
+          if [ -n "$NTFY_TOPIC" ]; then
+            SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+            curl -s -X POST "${SERVER}/${NTFY_TOPIC}" \
+              -H "Title: Workflow Failed: ${{ github.event.workflow_run.name }}" \
+              -H "Priority: 5" \
+              -H "Tags: x" \
+              -H "Click: ${{ github.event.workflow_run.html_url }}" \
+              -d "Repository: ${{ github.repository }} | Branch: ${{ github.event.workflow_run.head_branch }}"
+          fi
+
+      - name: Send Custom Webhook
+        continue-on-error: true
+        env:
+          CUSTOM_WEBHOOK_URL: ${{ secrets.CUSTOM_WEBHOOK_URL }}
+        run: |
+          if [ -n "$CUSTOM_WEBHOOK_URL" ]; then
+            curl -s -X POST "$CUSTOM_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d '{"event": "workflow_failed", "workflow": "${{ github.event.workflow_run.name }}", "repository": "${{ github.repository }}", "branch": "${{ github.event.workflow_run.head_branch }}", "url": "${{ github.event.workflow_run.html_url }}"}'
+          fi
+
+      - name: Notification Complete
+        run: echo "Notification job completed"
