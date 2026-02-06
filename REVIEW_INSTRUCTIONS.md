@@ -5,72 +5,63 @@
 ```json
 {
   "review": {
-    "summary": "The PR contains critical issues that prevent merging. Most notably, the lockfiles reference hallucinated/future versions of dependencies (Vite 7, React 19.2) which will cause immediate build failures. Functionally, the Cerebra proxy contains a critical bypass where streaming requests (SSE) completely skip budget enforcement. Several security vulnerabilities exist regarding shell injection in CI workflows and accidental commits of temporary artifacts.",
+    "summary": "This PR introduces the Cerebra MVP and a comprehensive AI agent configuration. While the architecture is ambitious, there are critical issues preventing approval. The frontend dependencies and referenced model versions (React 19.2, Vite 7.3, Claude 4.6) are non-existent or futuristic, rendering the project unbuildable. Security is a major concern: the Cerebra management API appears to lack authentication, allowing public access to sensitive budget and cost data. Budget enforcement fails open (allows requests) if Redis is down, negating its control value. The proxy implementation buffers up to 100MB per request in memory, creating a trivial DoS vector.",
     "decision": "REQUEST_CHANGES"
   },
   "issues": [
     {
       "id": 1,
       "severity": "critical",
-      "file": "package-lock.json",
+      "file": "dashboard/package.json",
       "line": 1,
-      "title": "Hallucinated Dependency Versions",
-      "description": "The lockfile references non-existent future versions of major packages (`vite@7.3.1`, `react@19.2.4`, `typescript@5.9.3`). These versions do not exist on public registries. This renders the project unbuildable and poses a security risk (Dependency Confusion) if these version numbers are claimed by attackers.",
-      "suggestion": "Delete `package-lock.json` and run `npm install` to generate a valid lockfile with actual, existing versions."
+      "title": "Invalid/Non-existent Dependency Versions",
+      "description": "The package.json specifies versions that do not exist in public registries: `react: ^19.2.0`, `tailwindcss: ^4.1.18`, `vite: ^7.3.1`, `typescript: ^5.9.3`. Current stable versions are significantly lower (e.g., React 18.x/19-rc, Vite 5.x). This appears to be hallucinated configuration which will cause build failures or supply chain attacks if malicious packages claim these version numbers.",
+      "suggestion": "Downgrade dependencies to currently available stable versions (e.g., React 18.2.0, Vite 5.x, Tailwind 3.4)."
     },
     {
       "id": 2,
       "severity": "critical",
-      "file": "cerebra/internal/proxy/handler.go",
-      "line": 180,
-      "title": "Budget Enforcement Bypass via Streaming",
-      "description": "The `streamResponse` handler explicitly skips cost calculation and calls to `enforcer.RecordSpend`. This creates a loophole allowing users to bypass all budget limits by using streaming APIs (the primary mode for LLMs), rendering the budget enforcement feature ineffective.",
-      "suggestion": "Implement token counting for streams (e.g., by accumulating chunks or using an approximation) and ensure cost is recorded after the stream completes."
+      "file": "cerebra/cmd/main.go",
+      "line": 1,
+      "title": "Unauthenticated Management API",
+      "description": "The management endpoints (`/api/v1/costs`, `/api/v1/budgets`, etc.) are exposed via the Gin router without any visible authentication middleware. While the proxy endpoints authenticate against LLM providers, the Cerebra dashboard API allows unauthenticated read/write access to financial data and budget configurations.",
+      "suggestion": "Implement an authentication middleware (e.g., JWT, Basic Auth, or API Key) for the `v1` route group and ensure the frontend client sends credentials."
     },
     {
       "id": 3,
-      "severity": "critical",
-      "file": ".github/workflows/combined-pr-review.yml",
-      "line": 45,
-      "title": "Shell Injection Vulnerability in Workflow",
-      "description": "The workflow interpolates user input directly into a shell command: `git fetch origin ${{ github.event.pull_request.head.ref }}`. A malicious branch name could execute arbitrary code in the runner context.",
-      "suggestion": "Map the untrusted input to an environment variable (e.g., `env: HEAD_REF: ${{ ... }}`) and use the environment variable in the run script (`git fetch origin \"$HEAD_REF\"`)."
+      "severity": "important",
+      "file": "cerebra/internal/budget/enforcer.go",
+      "line": 1,
+      "title": "Fail-Open Budget Enforcement",
+      "description": "The budget enforcement logic defaults to `allow=true` if the Redis connection fails or returns an error. While this maximizes availability, it defeats the primary purpose of a 'Budget Enforcer' by allowing potentially unlimited spending during infrastructure outages.",
+      "suggestion": "Change default behavior to fail-closed (block requests) when budget data is inaccessible, or implement a local in-memory fallback cache with strict limits."
     },
     {
       "id": 4,
       "severity": "important",
-      "file": "tools/onefilellm/tmp/tmp.EDsqM7tzY4/tools/onefilellm/README.md",
+      "file": "cerebra/internal/proxy/handler.go",
       "line": 1,
-      "title": "Accidental Commit of Temporary Artifacts",
-      "description": "Temporary build artifacts and deeply nested temporary directories (`tmp/tmp.EDsqM7tzY4/...`) have been committed to the repository.",
-      "suggestion": "Remove the `tools/onefilellm/tmp` directory and update `.gitignore` to exclude `tmp/` directories."
+      "title": "Potential Denial of Service (OOM)",
+      "description": "The proxy handler sets `maxResponseBodySize` to 100MB and reads the entire body into memory for non-streaming requests using `io.ReadAll`. A small number of concurrent large requests could exhaust the container's memory.",
+      "suggestion": "Reduce `maxResponseBodySize` to a safer default (e.g., 10-20MB) or implement `io.Copy` based streaming even for non-SSE requests to avoid buffering the full response."
     },
     {
       "id": 5,
       "severity": "important",
-      "file": "cerebra/internal/budget/enforcer.go",
-      "line": 50,
-      "title": "Potential Double Counting of Spend",
-      "description": "The summary states `CheckBudget` uses a Lua script to 'check and increment' (reservation model). `RecordSpend` also appears to add to the spend. If both are called for the same request, costs will be double-counted.",
-      "suggestion": "Verify logic: If `CheckBudget` reserves funds, `RecordSpend` should be a settlement/adjustment operation, or `CheckBudget` should be read-only."
+      "file": "deploy/docker/docker-compose.dev.yml",
+      "line": 1,
+      "title": "Hardcoded Credentials",
+      "description": "The docker-compose file contains hardcoded secrets (`POSTGRES_PASSWORD: oco_dev_password`). While this is a development file, these credentials often leak into production configurations.",
+      "suggestion": "Use an `.env` file for docker-compose variables and ensure it is git-ignored."
     },
     {
       "id": 6,
-      "severity": "important",
-      "file": "docs/ANTHROPIC-MODELS.md",
-      "line": 10,
-      "title": "Configuration References Non-Existent Models",
-      "description": "Configuration files and docs reference `claude-opus-4-5-20251101`. This model ID is invalid and will likely cause API errors if used.",
-      "suggestion": "Update configurations to use currently available model IDs."
-    },
-    {
-      "id": 7,
       "severity": "suggestion",
-      "file": "cerebra/internal/config/config.go",
-      "line": 45,
-      "title": "DSN Leaks Credentials",
-      "description": "The `DSN()` method returns the connection string with the password in cleartext. If this is logged by the application or an ORM, it will leak credentials.",
-      "suggestion": "Ensure this value is never logged, or provide a `RedactedDSN()` method for logging purposes."
+      "file": "cerebra/internal/database/database.go",
+      "line": 1,
+      "title": "Raw SQL Schema Management",
+      "description": "Database migrations are handled via raw SQL strings inside Go code (`IF NOT EXISTS`). This is error-prone and lacks version control capabilities found in dedicated migration tools.",
+      "suggestion": "Adopt a proper migration tool like `golang-migrate` or `goose` to manage schema versioning."
     }
   ]
 }
