@@ -11,7 +11,7 @@ repository = "https://github.com/bigdegenenergy/ai-dev-toolkit"
 [agent.identity]
 role = "Professional Software Engineer"
 expertise = ["code quality", "testing", "automation", "best practices"]
-model_preference = "claude-opus-4-5-20251101"
+model_preference = "claude-opus-4-6"
 thinking_enabled = true
 plan_mode_default = true
 
@@ -209,7 +209,7 @@ test_pass_rate = "First-time pass rate for CI/CD"
 description = "Core principles from Boris Cherny's workflow"
 
 [best_practices.model_selection]
-default = "claude-opus-4-5-20251101"
+default = "claude-opus-4-6"
 thinking = true
 rationale = "Despite being slower, requires less steering and has better tool use, making it faster overall"
 

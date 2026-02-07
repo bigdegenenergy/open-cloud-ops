@@ -17,68 +17,128 @@ FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 # ============================================
 # DANGEROUS COMMAND PATTERNS
 # ============================================
+# SECURITY: Use [[:space:]]+ for whitespace matching to prevent bypass with extra spaces
+# Example: "rm  -rf /" (two spaces) would bypass "rm -rf /" but not "rm[[:space:]]+-rf[[:space:]]+/"
+# Using POSIX-compliant [[:space:]]+ instead of \s+ for portability across all platforms
 
 DANGEROUS_PATTERNS=(
-    # Destructive file operations
-    "rm -rf /"
-    "rm -rf /*"
-    "rm -rf ~"
-    "rm -rf \$HOME"
+    # Destructive file operations (use [[:space:]]+ for whitespace to prevent bypass with extra spaces)
+    'rm[[:space:]]+-rf[[:space:]]+/'
+    'rm[[:space:]]+-rf[[:space:]]+/\*'
+    'rm[[:space:]]+-rf[[:space:]]+~'
+    'rm[[:space:]]+-rf[[:space:]]+\$HOME'
 
     # Git destructive operations
-    "git reset --hard"
-    "git push.*--force"
-    "git push.*-f"
-    "git clean -fdx"
+    'git[[:space:]]+reset[[:space:]]+--hard'
+    'git[[:space:]]+push.*--force'
+    'git[[:space:]]+push.*-f[[:space:]]'
+    'git[[:space:]]+clean[[:space:]]+-fdx'
 
     # Database destructive operations
-    "drop table"
-    "drop database"
-    "truncate table"
-    "delete from.*where 1=1"
-    "delete from.*without where"
+    'drop[[:space:]]+table'
+    'drop[[:space:]]+database'
+    'truncate[[:space:]]+table'
+    'delete[[:space:]]+from.*where[[:space:]]+1[[:space:]]*=[[:space:]]*1'
+    # Block unbounded DELETE (no WHERE clause) - matches "DELETE FROM table;" pattern
+    'delete[[:space:]]+from[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*;'
+    # Block DELETE FROM * (wildcard deletion)
+    'delete[[:space:]]+from[[:space:]]+\*'
 
     # System-level operations
-    "chmod 777"
-    "chmod -R 777"
-    "sudo rm"
-    "sudo chmod"
-    "> /dev/sd"
-    "mkfs"
-    "dd if=.*/dev/"
+    'chmod[[:space:]]+777'
+    'chmod[[:space:]]+-R[[:space:]]+777'
+    'sudo[[:space:]]+rm'
+    'sudo[[:space:]]+chmod'
+    '>[[:space:]]*/dev/sd'
+    'mkfs'
+    'dd[[:space:]]+if=.*/dev/'
 
     # Credential exposure
-    "cat.*\.env"
-    "cat.*credentials"
-    "cat.*secret"
-    "cat.*/etc/passwd"
-    "cat.*/etc/shadow"
-    "echo.*API_KEY"
-    "echo.*SECRET"
-    "echo.*PASSWORD"
+    'cat[[:space:]]+.*\.env'
+    'cat[[:space:]]+.*credentials'
+    'cat[[:space:]]+.*secret'
+    'cat[[:space:]]+.*/etc/passwd'
+    'cat[[:space:]]+.*/etc/shadow'
+    'echo[[:space:]]+.*API_KEY'
+    'echo[[:space:]]+.*SECRET'
+    'echo[[:space:]]+.*PASSWORD'
 
     # Network exfiltration patterns
-    "curl.*\|.*sh"
-    "wget.*\|.*sh"
-    "curl.*\|.*bash"
-    "wget.*\|.*bash"
+    'curl.*\|.*sh'
+    'wget.*\|.*sh'
+    'curl.*\|.*bash'
+    'wget.*\|.*bash'
 )
 
 # ============================================
 # SENSITIVE FILE PATTERNS
 # ============================================
+# SECURITY: Comprehensive list of credential and configuration files
+# that should never be read or modified by agents
 
 SENSITIVE_FILES=(
+    # Environment files
     ".env"
     ".env.local"
     ".env.production"
+    ".env.development"
+    ".env.staging"
+
+    # Credential files
     "credentials.json"
     "secrets.yaml"
     "secrets.yml"
+    "service-account.json"
+
+    # SSH keys
     ".ssh/id_rsa"
     ".ssh/id_ed25519"
+    ".ssh/id_dsa"
+    ".ssh/authorized_keys"
+    ".ssh/known_hosts"
+
+    # Certificate/key files
     "*.pem"
     "*.key"
+    "*.p12"
+    "*.pfx"
+
+    # AWS credentials
+    ".aws/credentials"
+    ".aws/config"
+
+    # GCP credentials
+    "gcloud/credentials"
+    "application_default_credentials.json"
+
+    # Azure credentials
+    ".azure/credentials"
+
+    # Docker credentials
+    ".docker/config.json"
+
+    # Kubernetes credentials
+    ".kube/config"
+
+    # Database configuration files (contain credentials)
+    ".pgpass"
+    ".my.cnf"
+    "database.yml"
+    ".pg_service.conf"
+
+    # System files (absolute paths)
+    "/etc/passwd"
+    "/etc/shadow"
+    "/etc/sudoers"
+    "/etc/ssh/ssh_host"
+
+    # NPM/Yarn tokens
+    ".npmrc"
+    ".yarnrc"
+
+    # Git credentials
+    ".git-credentials"
+    ".netrc"
 )
 
 # ============================================
@@ -135,7 +195,7 @@ if [[ "$TOOL_NAME" == "Write" || "$TOOL_NAME" == "Edit" ]]; then
 
     if [[ -n "$CONTENT" ]]; then
         # Check for hardcoded secrets patterns
-        if echo "$CONTENT" | grep -qiE "(password|api_key|secret|token)\s*[:=]\s*['\"][^'\"]{8,}['\"]"; then
+        if echo "$CONTENT" | grep -qiE "(password|api_key|secret|token)[[:space:]]*[:=][[:space:]]*['\"][^'\"]{8,}['\"]"; then
             echo "WARNING: Potential hardcoded secret detected in content." >&2
             echo "File: $FILE_PATH" >&2
             echo "" >&2

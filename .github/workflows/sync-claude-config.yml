@@ -24,8 +24,9 @@
 #
 # SECURITY NOTE:
 # This workflow syncs executable hooks and configuration from an external repo.
-# Always review the generated PR before merging. The .github/workflows sync
-# option is disabled by default for security reasons.
+# Always review the generated PR before merging. When workflow sync is enabled,
+# ALL workflows from the upstream repo will be synced (overwriting existing files).
+# This enables daily updates across multiple downstream repos from one upstream.
 #
 # BRANCH PROTECTION (Recommended):
 # Set up branch protection on your main branch to ensure sync PRs are reviewed:
@@ -61,7 +62,7 @@ on:
         default: 'main'
         type: string
       sync_github_workflows:
-        description: 'Sync .github/workflows (enabled by default - review PR before merging)'
+        description: 'Sync ALL .github/workflows from upstream (overwrites existing - review PR before merging)'
         required: false
         default: true
         type: boolean
@@ -69,6 +70,11 @@ on:
         description: 'Dry run - show changes without creating PR'
         required: false
         default: false
+        type: boolean
+      run_audit:
+        description: 'Run Agent Readiness Audit and include results in PR'
+        required: false
+        default: true
         type: boolean
 
 env:
@@ -93,6 +99,12 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python (for Agent Readiness Audit)
+        if: inputs.run_audit != false
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Configure Git
         run: |
@@ -170,6 +182,7 @@ jobs:
         if: inputs.sync_github_workflows != false
         run: |
           echo "🔄 Syncing .github/workflows/ directory..."
+          echo "   Syncing ALL workflows from upstream (overwriting existing files)"
           echo "   Review PR carefully before merging"
           echo ""
 
@@ -178,37 +191,38 @@ jobs:
           if [ -d "/tmp/claude-code-source/.github/workflows" ]; then
             mkdir -p .github/workflows
             mkdir -p .github/scripts
+            mkdir -p .github/actions
             mkdir -p .github/ISSUE_TEMPLATE
 
-            # Sync all workflow files
-            SYNC_WORKFLOWS=(
-              "ci.yml"
-              "security.yml"
-              "pii-scan-content.yml"
-              "gemini-pr-review-plus.yml"
-              "agent-reminder.yml"
-              "label-agent-prs.yml"
-              "notify-on-failure.yml"
-              "claude.yml"
-              "claude-auto-implement.yml"
-              "claude-code-implement.yml"
-              "claude-research-implement.yml"
-              "claude-security-review.yml"
-              "onefilellm.yml"
-              "sync-claude-config.yml"
-            )
+            # Sync ALL workflow files from upstream (force overwrite)
+            # This enables daily updates across multiple repos from one upstream
+            echo "  Syncing all workflow files..."
+            for workflow in /tmp/claude-code-source/.github/workflows/*.yml; do
+              [ -f "$workflow" ] || continue
+              workflow_name=$(basename "$workflow")
+              cp "$workflow" ".github/workflows/$workflow_name"
+              echo "    Synced: $workflow_name"
+            done
 
-            for workflow in "${SYNC_WORKFLOWS[@]}"; do
-              if [ -f "/tmp/claude-code-source/.github/workflows/$workflow" ]; then
-                cp "/tmp/claude-code-source/.github/workflows/$workflow" ".github/workflows/$workflow"
-                echo "  Synced: $workflow"
-              fi
+            # Also sync .yaml files if any exist
+            for workflow in /tmp/claude-code-source/.github/workflows/*.yaml; do
+              [ -f "$workflow" ] || continue
+              workflow_name=$(basename "$workflow")
+              cp "$workflow" ".github/workflows/$workflow_name"
+              echo "    Synced: $workflow_name"
             done
 
             # Sync scripts directory
             if [ -d "/tmp/claude-code-source/.github/scripts" ]; then
               cp -R /tmp/claude-code-source/.github/scripts/* .github/scripts/ 2>/dev/null || true
               echo "  Synced: scripts/"
+            fi
+
+            # Sync actions directory (composite actions like provenance-gate)
+            if [ -d "/tmp/claude-code-source/.github/actions" ]; then
+              mkdir -p .github/actions
+              cp -R /tmp/claude-code-source/.github/actions/* .github/actions/ 2>/dev/null || true
+              echo "  Synced: actions/"
             fi
 
             # Sync issue templates
@@ -229,7 +243,7 @@ jobs:
               echo "  Synced: mcp-config.json.template"
             fi
 
-            echo "✅ GitHub directory synced"
+            echo "✅ GitHub directory synced (all workflows)"
 
             # Check for changes
             if ! git diff --quiet .github/; then
@@ -312,6 +326,50 @@ jobs:
 
           echo "changes_made=$CHANGES_MADE" >> $GITHUB_OUTPUT
 
+      - name: Run Agent Readiness Audit
+        if: inputs.run_audit != false
+        id: audit
+        run: |
+          echo "🔍 Running Agent Readiness Audit..."
+
+          # Install the audit tool
+          pip install --quiet agent-readiness-audit
+
+          # Create output directory (within .claude/artifacts to be gitignored by default)
+          mkdir -p .claude/artifacts/audit
+
+          # Run audit and capture results
+          set +e
+          ara scan --repo . \
+            --output-dir .claude/artifacts/audit \
+            --format json \
+            --format markdown 2>&1 | tee /tmp/audit-output.txt
+          AUDIT_EXIT_CODE=$?
+          set -e
+
+          echo "audit_exit_code=$AUDIT_EXIT_CODE" >> $GITHUB_OUTPUT
+
+          # Extract score from JSON if available
+          if [ -f ".claude/artifacts/audit/report.json" ]; then
+            SCORE=$(jq -r '.score // .total_score // "unknown"' .claude/artifacts/audit/report.json 2>/dev/null || echo "unknown")
+            MATURITY=$(jq -r '.maturity_level // .maturity // "unknown"' .claude/artifacts/audit/report.json 2>/dev/null || echo "unknown")
+            echo "score=$SCORE" >> $GITHUB_OUTPUT
+            echo "maturity=$MATURITY" >> $GITHUB_OUTPUT
+            echo "✅ Audit complete: Score=$SCORE/16, Maturity=$MATURITY"
+          else
+            echo "score=unknown" >> $GITHUB_OUTPUT
+            echo "maturity=unknown" >> $GITHUB_OUTPUT
+            echo "⚠️ Could not parse audit results"
+          fi
+
+          # Rename markdown report for clarity
+          if [ -f ".claude/artifacts/audit/report.md" ]; then
+            mv .claude/artifacts/audit/report.md .claude/artifacts/audit/agent-readiness-report.md
+          fi
+
+          # Stage audit results
+          git add -A .claude/artifacts/audit/ 2>/dev/null || true
+
       - name: Get source repo version
         id: version
         run: |
@@ -377,11 +435,31 @@ jobs:
           COMMIT_SHA: ${{ steps.version.outputs.commit_sha }}
           COMMIT_DATE: ${{ steps.version.outputs.commit_date }}
           SYNC_WORKFLOWS: ${{ inputs.sync_github_workflows }}
+          AUDIT_SCORE: ${{ steps.audit.outputs.score }}
+          AUDIT_MATURITY: ${{ steps.audit.outputs.maturity }}
         run: |
           # Build PR body
           WORKFLOW_LINE=""
           if [ "$SYNC_WORKFLOWS" == "true" ]; then
-            WORKFLOW_LINE="- \`.github/workflows/\` (CI/CD workflows)"
+            WORKFLOW_LINE="- \`.github/workflows/\` (ALL workflows synced from upstream)
+          - \`.github/actions/\` (composite actions: provenance-gate)"
+          fi
+
+          # Build audit section if audit was run
+          AUDIT_SECTION=""
+          if [ -n "$AUDIT_SCORE" ] && [ "$AUDIT_SCORE" != "" ]; then
+            AUDIT_SECTION="
+          ### 🔍 Agent Readiness Audit
+
+          | Metric | Value |
+          |--------|-------|
+          | **Score** | ${AUDIT_SCORE}/16 |
+          | **Maturity Level** | ${AUDIT_MATURITY} |
+
+          The [Agent Readiness Audit](https://github.com/bigdegenenergy/agent-readiness-audit) evaluates repository maturity for AI agent tooling across 15 pillars including reproducible builds, test infrastructure, type safety, documentation, and security practices.
+
+          Full report: \`.claude/artifacts/audit/agent-readiness-report.md\`
+          "
           fi
 
           PR_BODY="## 🔄 Claude Code Configuration Sync
@@ -401,7 +479,7 @@ jobs:
           ${WORKFLOW_LINE}
 
           **Note:** \`CLAUDE.md\` is NOT synced - each repo maintains its own project instructions.
-
+          ${AUDIT_SECTION}
           ### ⚠️ CI Note
           If this PR was created using the default GITHUB_TOKEN, CI workflows
           may not have triggered automatically. To run CI:
@@ -413,6 +491,7 @@ jobs:
           - [ ] Check for any project-specific customizations that may have been overwritten
           - [ ] Verify hooks and commands work correctly
           - [ ] Run tests to ensure nothing is broken
+          ${AUDIT_SECTION:+- [ ] Review agent readiness audit findings}
 
           ### Local Files Preserved
           The following local files were **not** overwritten:
@@ -423,14 +502,25 @@ jobs:
           ---
           *This PR was automatically created by the [sync-claude-config](.github/workflows/sync-claude-config.yml) workflow.*"
 
-          gh pr create \
+          # Ensure labels exist before creating PR (--force updates if exists, creates if not)
+          gh label create "automated" --description "Automated PR" --color "0E8A16" --force 2>/dev/null || true
+          gh label create "claude-code" --description "Claude Code configuration" --color "7057FF" --force 2>/dev/null || true
+
+          # Create PR with labels
+          if gh pr create \
             --title "chore: sync Claude Code config (${COMMIT_DATE})" \
             --body "$PR_BODY" \
             --label "automated,claude-code" \
-            --head "${{ steps.branch.outputs.branch_name }}" \
-            || echo "PR creation failed - may already exist or labels don't exist"
-
-          echo "✅ Pull request created"
+            --head "${{ steps.branch.outputs.branch_name }}"; then
+            echo "✅ Pull request created"
+          else
+            echo "⚠️ PR creation failed - may already exist"
+            # Check if PR already exists for this branch
+            EXISTING_PR=$(gh pr list --head "${{ steps.branch.outputs.branch_name }}" --json url --jq '.[0].url' 2>/dev/null || true)
+            if [ -n "$EXISTING_PR" ]; then
+              echo "📋 Existing PR: $EXISTING_PR"
+            fi
+          fi
 
       - name: Summary
         run: |
@@ -446,4 +536,17 @@ jobs:
           if [ "${{ steps.changes.outputs.has_changes }}" == "true" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
             echo "| Branch Created | \`${{ steps.branch.outputs.branch_name }}\` |" >> $GITHUB_STEP_SUMMARY
             echo "| PR Created | ✅ |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Add audit results to summary if available
+          if [ -n "${{ steps.audit.outputs.score }}" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 🔍 Agent Readiness Audit" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Score | ${{ steps.audit.outputs.score }}/16 |" >> $GITHUB_STEP_SUMMARY
+            echo "| Maturity Level | ${{ steps.audit.outputs.maturity }} |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "[About Agent Readiness Audit](https://github.com/bigdegenenergy/agent-readiness-audit)" >> $GITHUB_STEP_SUMMARY
           fi

@@ -164,7 +164,7 @@ jobs:
 
           if [ -z "$TEXT" ]; then
             echo "Failed to get classification, defaulting to opus"
-            echo "selected_model=claude-opus-4-5-20251101" >> $GITHUB_OUTPUT
+            echo "selected_model=claude-opus-4-6" >> $GITHUB_OUTPUT
             echo "model_reason=Classification failed, using Opus as fallback" >> $GITHUB_OUTPUT
             exit 0
           fi
@@ -183,7 +183,7 @@ jobs:
           if [ "$MODEL_CHOICE" = "haiku" ]; then
             echo "selected_model=claude-haiku-4-5-20251001" >> $GITHUB_OUTPUT
           else
-            echo "selected_model=claude-opus-4-5-20251101" >> $GITHUB_OUTPUT
+            echo "selected_model=claude-opus-4-6" >> $GITHUB_OUTPUT
           fi
           echo "model_reason=$REASON" >> $GITHUB_OUTPUT
 
@@ -207,7 +207,17 @@ jobs:
           MCP_CONFIG_FILE="${RUNNER_TEMP}/mcp-config.json"
 
           # Use jq for safe JSON generation with proper escaping of special characters
-          # NOTE: fetch MCP server removed to mitigate SSRF risk (arbitrary HTTP from runner)
+          #
+          # SECURITY: The "fetch" MCP server is DISABLED by default.
+          # Enabling it allows Claude to make arbitrary HTTP requests, which creates
+          # SSRF (Server-Side Request Forgery) risks in CI/CD environments:
+          # - Access to cloud metadata endpoints (169.254.169.254)
+          # - Access to internal network services
+          # - Potential credential theft from runner-accessible endpoints
+          #
+          # Only enable the fetch server if your CI runner is strictly network-isolated
+          # from internal resources and cloud metadata services.
+          #
           jq -n \
             --arg brave_key "$BRAVE_API_KEY" \
             '{
@@ -227,7 +237,7 @@ jobs:
 
       - name: Run Claude Code Action
         if: steps.check-perms.outputs.has_access == 'true'
-        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
+        uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Use GH_TOKEN for git operations (push, create branches, etc.)

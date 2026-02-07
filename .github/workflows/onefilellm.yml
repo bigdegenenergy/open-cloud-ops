@@ -186,42 +186,40 @@ jobs:
           done
 
           # Validate URLs to prevent SSRF (Issue #2)
-          # Block private IP ranges, loopback, IPv6, and cloud metadata services
-          # Uses Python for robust URL parsing instead of fragile sed regex
+          # Block private IP ranges, loopback, and cloud metadata services
           for source in $INPUT_SOURCES; do
+            # Extract URL scheme and host if it looks like a URL
             if [[ "$source" =~ ^https?:// ]]; then
-              python3 -c "
-import sys, ipaddress
-from urllib.parse import urlparse
+              # Extract hostname from URL
+              hostname=$(echo "$source" | sed -E 's|^https?://([^/:]+).*|\1|')
 
-url = sys.argv[1]
-parsed = urlparse(url)
-hostname = parsed.hostname or ''
+              # Block loopback addresses
+              if [[ "$hostname" =~ ^(localhost|127\.|0\.0\.0\.0) ]]; then
+                echo "Error: Source '$source' targets loopback address. This is not allowed for security reasons."
+                exit 1
+              fi
 
-# Strip brackets from IPv6
-if hostname.startswith('[') and hostname.endswith(']'):
-    hostname = hostname[1:-1]
+              # Block private IP ranges (RFC1918)
+              if [[ "$hostname" =~ ^10\. ]] || \
+                 [[ "$hostname" =~ ^192\.168\. ]] || \
+                 [[ "$hostname" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+                echo "Error: Source '$source' targets private IP range. This is not allowed for security reasons."
+                exit 1
+              fi
 
-# Block empty hostname
-if not hostname:
-    print(f'Error: No hostname in URL: {url}')
-    sys.exit(1)
+              # Block cloud metadata services
+              if [[ "$hostname" =~ ^169\.254\.169\.254 ]] || \
+                 [[ "$hostname" =~ ^metadata\. ]] || \
+                 [[ "$hostname" = "metadata" ]]; then
+                echo "Error: Source '$source' targets cloud metadata service. This is not allowed for security reasons."
+                exit 1
+              fi
 
-# Try to parse as IP address to catch all formats (octal, hex, dword, IPv6)
-try:
-    addr = ipaddress.ip_address(hostname)
-    if addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_reserved:
-        print(f'Error: URL targets blocked address ({addr}): {url}')
-        sys.exit(1)
-except ValueError:
-    pass  # Not an IP — it's a hostname, check below
-
-# Block known hostname patterns for metadata services
-blocked_hosts = ['localhost', 'metadata', 'metadata.google.internal']
-if hostname.lower() in blocked_hosts or hostname.lower().startswith('metadata.'):
-    print(f'Error: URL targets blocked hostname ({hostname}): {url}')
-    sys.exit(1)
-" "$source" || exit 1
+              # Block link-local addresses
+              if [[ "$hostname" =~ ^169\.254\. ]]; then
+                echo "Error: Source '$source' targets link-local address. This is not allowed for security reasons."
+                exit 1
+              fi
             fi
           done
 

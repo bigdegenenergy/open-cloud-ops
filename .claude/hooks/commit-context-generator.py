@@ -62,7 +62,9 @@ def get_changed_files(base: str | None = None, head: str | None = None) -> list[
     Otherwise, use staged changes.
     """
     if base and head:
-        output = run_git(["diff", "--name-only", "--diff-filter=ACMRD", f"{base}...{head}"])
+        output = run_git(
+            ["diff", "--name-only", "--diff-filter=ACMRD", f"{base}...{head}"]
+        )
     else:
         output = run_git(["diff", "--cached", "--name-only", "--diff-filter=ACMRD"])
     return [f for f in output.split("\n") if f]
@@ -213,7 +215,9 @@ def analyze_diff(diff: str) -> dict:
                 patterns["new_class"] = True
             elif content.startswith(("import ", "from ")):
                 patterns["imports_changed"] = True
-            elif "test" in content.lower() and any(x in content for x in ("def ", "it(", "describe(")):
+            elif "test" in content.lower() and any(
+                x in content for x in ("def ", "it(", "describe(")
+            ):
                 patterns["tests_added"] = True
             elif any(x in content for x in ("try:", "catch", "except")):
                 patterns["error_handling"] = True
@@ -446,7 +450,11 @@ def main():
 
     if not changed_files:
         if args.json:
-            print(json.dumps({"summary": "No changes", "files": [], "change_type": "none"}))
+            print(
+                json.dumps(
+                    {"summary": "No changes", "files": [], "change_type": "none"}
+                )
+            )
         else:
             print("No changes to document")
         sys.exit(0)

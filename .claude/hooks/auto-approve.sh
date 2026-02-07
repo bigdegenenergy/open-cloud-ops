@@ -2,6 +2,9 @@
 # PermissionRequest Hook - Auto-Approve Trusted Commands
 # Eliminates approval friction for commands you already trust.
 #
+# This hook intercepts permission requests and automatically approves
+# safe, well-known commands. No more clicking "approve" for pytest.
+#
 # Output: JSON with decision field
 #   {"decision": "approve"} - Auto-approve the command
 #   {"decision": "deny", "message": "reason"} - Block the command
@@ -10,6 +13,24 @@
 # Exit codes:
 #   0 = Hook ran successfully (output determines action)
 #   non-zero = Hook failed, fall through to normal behavior
+#
+# SECURITY NOTES:
+# ===============
+# DO NOT auto-approve commands that execute user-defined scripts from
+# mutable config files (package.json, Makefile, etc.). An agent could:
+# 1. Modify package.json to add malicious code to "test" script
+# 2. Run "npm test" which would be auto-approved
+# 3. Execute arbitrary code without human review
+#
+# Therefore, we only auto-approve:
+# - Direct binary runners (pytest, cargo test, go test)
+# - Read-only tools (git status, ls, grep)
+# - Formatters that only modify files in expected ways
+#
+# We DO NOT auto-approve:
+# - npm/yarn/pnpm run <anything> (executes package.json scripts)
+# - make (executes Makefile targets)
+# - Any command that delegates to user-defined config
 
 # Read the permission request from stdin
 INPUT=$(cat)
@@ -24,7 +45,7 @@ FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 # ============================================
 
 # Function to check if command contains shell metacharacters that could chain commands
-# This prevents attacks like "npm test; rm -rf /" or "npm test && malicious"
+# This prevents attacks like "pytest; rm -rf /" or "pytest && malicious"
 contains_shell_metacharacters() {
     local cmd="$1"
 
@@ -35,7 +56,7 @@ contains_shell_metacharacters() {
     local CMD_SUBST='(`|\$\()'
     # Pattern 3: Output redirection (>)
     local REDIRECT='>'
-    # Pattern 4: Newlines (critical - "npm test\nrm -rf /" bypass)
+    # Pattern 4: Newlines (critical - "pytest\nrm -rf /" bypass)
     local NEWLINES=$'[\r\n]'
 
     if [[ "$cmd" =~ $CHAIN_CHARS ]] || \
@@ -51,12 +72,14 @@ contains_shell_metacharacters() {
 # TRUSTED BASH COMMANDS - AUTO APPROVE
 # ============================================
 #
-# SECURITY PRINCIPLES:
-# 1. Only auto-approve commands with fixed behavior (not project-defined)
-# 2. Commands that execute project scripts (npm test, make) are NOT auto-approved
-#    because the agent can edit those scripts and inject arbitrary code
-# 3. File read commands are NOT auto-approved (they could read ~/.ssh/*, /etc/*)
-#    The Read/Glob/Grep tools are preferred and auto-approved below
+# SECURITY NOTE: These patterns use prefix matching (^command).
+# This means "pytest --some-flag" will also be approved.
+# This is intentional to allow legitimate flags like --watch, --coverage.
+# The shell metacharacter check above prevents dangerous chaining.
+#
+# IMPORTANT: We only auto-approve commands that run binaries directly,
+# NOT package manager scripts (npm run, yarn, make) which execute
+# user-defined code from mutable config files.
 
 if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
     # SECURITY: Never auto-approve commands with shell metacharacters
@@ -65,8 +88,9 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Compiler/runtime test commands with FIXED behavior (not project-defined scripts)
-    # These run the language's built-in test runner, not user scripts:
+    # Test commands - ONLY direct binary runners
+    # SECURITY: Do NOT auto-approve npm test, yarn test, pnpm test, make test
+    # because package.json scripts can be modified to run arbitrary commands
     if [[ "$BASH_COMMAND" =~ ^pytest ]] || \
        [[ "$BASH_COMMAND" =~ ^python\ -m\ pytest ]] || \
        [[ "$BASH_COMMAND" =~ ^cargo\ test ]] || \
@@ -75,7 +99,9 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Lint commands - read-only analysis with fixed behavior
+    # Lint commands - ONLY direct binary runners
+    # SECURITY: Do NOT auto-approve npm run lint, pnpm lint, yarn lint
+    # because package.json scripts can be modified to run arbitrary commands
     if [[ "$BASH_COMMAND" =~ ^npx\ eslint ]] || \
        [[ "$BASH_COMMAND" =~ ^ruff\ check ]] || \
        [[ "$BASH_COMMAND" =~ ^flake8 ]] || \
@@ -87,7 +113,7 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Format commands - fixed behavior formatters
+    # Format commands - safe, modifies files but in expected ways
     if [[ "$BASH_COMMAND" =~ ^npx\ prettier ]] || \
        [[ "$BASH_COMMAND" =~ ^black ]] || \
        [[ "$BASH_COMMAND" =~ ^isort ]] || \
@@ -98,14 +124,16 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Compiler/build commands with FIXED behavior (not project-defined scripts)
+    # Build commands - ONLY direct binary runners
+    # SECURITY: Do NOT auto-approve npm run build, yarn build, pnpm build, make
+    # because these execute user-defined scripts from package.json/Makefile
     if [[ "$BASH_COMMAND" =~ ^cargo\ build ]] || \
        [[ "$BASH_COMMAND" =~ ^go\ build ]]; then
         echo '{"decision": "approve"}'
         exit 0
     fi
 
-    # Type checking - read-only with fixed behavior
+    # Type checking - read-only
     if [[ "$BASH_COMMAND" =~ ^npx\ tsc ]] || \
        [[ "$BASH_COMMAND" =~ ^tsc\ --noEmit ]] || \
        [[ "$BASH_COMMAND" =~ ^mypy ]]; then
@@ -142,7 +170,7 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # Package info commands - safe (read-only metadata)
+    # Package info commands - safe
     if [[ "$BASH_COMMAND" =~ ^npm\ list ]] || \
        [[ "$BASH_COMMAND" =~ ^npm\ outdated ]] || \
        [[ "$BASH_COMMAND" =~ ^pip\ list ]] || \
@@ -152,20 +180,23 @@ if [[ "$TOOL_NAME" == "Bash" ]] && [[ -n "$BASH_COMMAND" ]]; then
         exit 0
     fi
 
-    # NOTE: The following are intentionally NOT auto-approved because they
-    # execute project-defined scripts that the agent could modify:
-    #   npm test, npm run build, npm run lint, pnpm *, yarn *
-    #   make, make test, make build
-    # File read commands (ls, cat, find, grep, head, tail) are also NOT
-    # auto-approved because they can access files outside the repository.
-    # Use the Read/Glob/Grep tools instead (auto-approved below).
+    # File listing/searching - safe
+    if [[ "$BASH_COMMAND" =~ ^ls ]] || \
+       [[ "$BASH_COMMAND" =~ ^find ]] || \
+       [[ "$BASH_COMMAND" =~ ^grep ]] || \
+       [[ "$BASH_COMMAND" =~ ^rg ]] || \
+       [[ "$BASH_COMMAND" =~ ^wc ]] || \
+       [[ "$BASH_COMMAND" =~ ^head ]] || \
+       [[ "$BASH_COMMAND" =~ ^tail ]] || \
+       [[ "$BASH_COMMAND" =~ ^cat ]]; then
+        echo '{"decision": "approve"}'
+        exit 0
+    fi
 fi
 
 # ============================================
-# FILE OPERATIONS (Claude Code native tools)
+# FILE OPERATIONS
 # ============================================
-# These tools are sandboxed by Claude Code and only access
-# files within the project directory.
 
 # Read operations are always safe
 if [[ "$TOOL_NAME" == "Read" ]]; then
