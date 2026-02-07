@@ -25,21 +25,11 @@ ls -1 .claude/workflows/definitions/*.yaml 2>/dev/null | xargs -I{} basename {} 
 
 ### Step 1: Load Workflow
 
-```bash
-# Load workflow engine using importlib (dot-prefixed dirs are not valid Python packages)
-python3 -c '
-import os, importlib.util
+```python
+from .claude.workflows.lobster import WorkflowEngine
 
-spec = importlib.util.spec_from_file_location(
-    "workflow_engine",
-    os.path.join(os.getcwd(), ".claude", "workflows", "lobster.py")
-)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-engine = mod.WorkflowEngine()
+engine = WorkflowEngine()
 workflow = engine.load_workflow("$WORKFLOW_NAME")
-'
 ```
 
 ### Step 2: Start Execution

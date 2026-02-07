@@ -1,6 +1,6 @@
 ---
 description: Enter rigorous planning mode. Do not write code yet.
-model: claude-opus-4-5-20251101
+model: claude-opus-4-6
 ---
 
 # Architectural Planning Mode

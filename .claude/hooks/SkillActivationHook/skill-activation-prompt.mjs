@@ -48,6 +48,39 @@ if (!userPromptLower) {
   process.exit(0);
 }
 
+// Special case: Detect Pulse idea payloads
+// If the prompt contains JSON with "idea_id", inject pulse-intake instructions
+const pulsePayloadPattern = /\{\s*"idea_id"\s*:/;
+if (pulsePayloadPattern.test(originalPrompt)) {
+  // Load pulse intake prompt
+  const pulsePromptPath = join(__dirname, '..', '..', 'prompts', 'pulse_intake.md');
+  let pulseInstructions = '';
+
+  if (existsSync(pulsePromptPath)) {
+    try {
+      pulseInstructions = readFileSync(pulsePromptPath, 'utf-8');
+    } catch (e) {
+      // Fallback if file unreadable
+    }
+  }
+
+  // Output the original prompt (the JSON payload) with pulse intake context
+  console.log(originalPrompt);
+  console.log('');
+  console.log('<pulse-intake>');
+  console.log('A Pulse idea payload was detected. Follow the pulse intake workflow:');
+  console.log('');
+  console.log('1. **Validate** the JSON payload against the schema');
+  console.log('2. **Create** `ideas/{idea_id}/` directory with spec.json and README.md');
+  console.log('3. **Create** feature branch: `idea/{idea_id}-{slug}`');
+  console.log('4. **Report** status and await "start" command (unless `_claude.action: "start"`)');
+  console.log('');
+  console.log('For full instructions, see: `.claude/prompts/pulse_intake.md`');
+  console.log('Schema: `.claude/schemas/pulse_payload.schema.json`');
+  console.log('</pulse-intake>');
+  process.exit(0);
+}
+
 // Skill definitions with trigger patterns
 const skillTriggers = {
   'tdd': {
