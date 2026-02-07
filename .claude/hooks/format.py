@@ -14,10 +14,11 @@ Supported formatters:
 - rubocop: Ruby
 - shfmt: Shell scripts
 """
-import sys
+
 import json
-import subprocess
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -31,63 +32,74 @@ def format_file(file_path: str) -> None:
 
     try:
         # JavaScript/TypeScript/Web -> Prettier
-        if ext in ('.js', '.ts', '.tsx', '.jsx', '.json', '.md', '.css', '.html', '.vue', '.svelte'):
+        if ext in (
+            ".js",
+            ".ts",
+            ".tsx",
+            ".jsx",
+            ".json",
+            ".md",
+            ".css",
+            ".html",
+            ".vue",
+            ".svelte",
+        ):
             subprocess.run(
-                ['npx', 'prettier', '--write', file_path],
+                ["npx", "prettier", "--write", file_path],
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                timeout=30
+                timeout=30,
             )
 
         # Python -> Black + isort
-        elif ext == '.py':
+        elif ext == ".py":
             subprocess.run(
-                ['black', '--quiet', file_path],
+                ["black", "--quiet", file_path],
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                timeout=30
+                timeout=30,
             )
             subprocess.run(
-                ['isort', '--quiet', file_path],
+                ["isort", "--quiet", file_path],
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                timeout=30
+                timeout=30,
             )
 
         # Go -> gofmt
-        elif ext == '.go':
+        elif ext == ".go":
             subprocess.run(
-                ['gofmt', '-w', file_path],
+                ["gofmt", "-w", file_path],
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                timeout=30
+                timeout=30,
             )
 
         # Rust -> rustfmt
-        elif ext == '.rs':
+        elif ext == ".rs":
             subprocess.run(
-                ['rustfmt', file_path],
+                ["rustfmt", file_path],
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                timeout=30
+                timeout=30,
             )
 
         # Ruby -> rubocop
-        elif ext == '.rb':
+        elif ext == ".rb":
             subprocess.run(
-                ['rubocop', '-a', file_path],
+                ["rubocop", "-a", file_path],
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                timeout=30
+                timeout=30,
             )
 
         # Shell -> shfmt
-        elif ext in ('.sh', '.bash'):
+        elif ext in (".sh", ".bash"):
             subprocess.run(
-                ['shfmt', '-w', file_path],
+                ["shfmt", "-w", file_path],
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                timeout=30
+                timeout=30,
             )
 
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -101,7 +113,7 @@ def main():
         input_data = json.load(sys.stdin)
 
         # Extract file path from tool_input
-        file_path = input_data.get('tool_input', {}).get('file_path')
+        file_path = input_data.get("tool_input", {}).get("file_path")
 
         if file_path:
             format_file(file_path)
@@ -114,5 +126,5 @@ def main():
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -84,7 +84,7 @@ jobs:
               // Full names (in context like "name:", "author:", etc.)
               fullName: {
                 pattern: /\b(name|author|user|contact|owner|created[_ ]?by|assigned[_ ]?to|submitted[_ ]?by)\s*[:=]?\s*[A-Z][a-z]+\s+[A-Z][a-z]+/gi,
-                excludes: /Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name/i,
+                excludes: /Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name|Check Permissions|Code Review|Code Action|Code Implement|Post Review|Run Codex|Run Gemini|Run Claude|Parse Codex|Parse Output|Setup Node|Install deps|Checkout code|Collect PR|Push Instructions|Cleanup stale|Telegram notification|Combine reviews|Post PR|Post feedback|Pre-fetch/i,
                 severity: 'critical',
                 name: 'Full Name'
               }

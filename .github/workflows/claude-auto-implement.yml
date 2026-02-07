@@ -175,7 +175,7 @@ jobs:
 
       - name: Run Claude Code Implementation
         id: implement
-        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
+        uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
@@ -230,7 +230,7 @@ jobs:
 
           claude_args: |
             --max-turns 100
-            --model claude-opus-4-5-20251101
+            --model claude-opus-4-6
 
       - name: Push changes
         id: push

@@ -93,10 +93,11 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          REPO="${{ github.repository }}"
 
           PERMISSION=$(gh api repos/"$REPO"/collaborators/"$AUTHOR"/permission --jq '.permission' 2>/dev/null || echo "none")
 
@@ -146,7 +147,7 @@ jobs:
 
       - name: Run Claude Security Review
         if: steps.check-key.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@b113f49a56229d8276e2bf05743ad6900121239c # v1
+        uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
@@ -231,7 +232,7 @@ jobs:
 
           claude_args: |
             --max-turns 30
-            --model claude-opus-4-5-20251101
+            --model claude-opus-4-6
 
       - name: Post notification for critical findings
         if: failure()

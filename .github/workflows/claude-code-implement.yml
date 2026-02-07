@@ -1,11 +1,16 @@
 name: Claude Code Implement Changes
-# Version: 2026-01-23-v11 - Fix model ID to use valid claude-haiku-4-5-20251001
+# Version: 2026-02-03-v12 - Add detailed implementation report showing each review item addressed
 #
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║ MODEL: claude-haiku-4-5-20251001                                          ║
 # ╠═══════════════════════════════════════════════════════════════════════════╣
 # ║ Using Claude 4.5 Haiku for natural language parsing of PR comments.       ║
 # ║ This is the official Anthropic model ID as of October 2025.               ║
+# ║                                                                           ║
+# ║ NEW: Implementation now provides detailed report showing:                 ║
+# ║ - Each review item and its status (FIXED/SKIPPED/MODIFIED)               ║
+# ║ - Files changed for each item                                            ║
+# ║ - What was done and assessment of legitimacy vs false positive           ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 on:
@@ -352,9 +357,51 @@ jobs:
           # NODE_PATH for main branch script (uses standard require)
           NODE_PATH: /tmp/claude-sdk/node_modules
         run: |
-          # Execute the implementation script
+          # Execute the implementation script and capture output
           SCRIPT_DIR="${{ github.workspace }}/_trusted_scripts/.github/scripts"
-          cd "$SCRIPT_DIR" && node claude-code-implement.cjs
+          cd "$SCRIPT_DIR" && node claude-code-implement.cjs 2>&1 | tee /tmp/claude-output.log
+
+      - name: Extract implementation report
+        id: report
+        run: |
+          # Extract the implementation report from Claude's output
+          # Look for the "### Implementation Report" section
+          REPORT=""
+          if grep -q "### Implementation Report" /tmp/claude-output.log; then
+            # Extract from "### Implementation Report" to end or next major section
+            # Use sed to extract the range
+            EXTRACTED=$(sed -n '/### Implementation Report/,/^## [^I]/p' /tmp/claude-output.log)
+
+            # Only strip the last line if it matches a section header pattern (starts with ##)
+            # This prevents truncation when Implementation Report is the final section
+            LAST_LINE=$(echo "$EXTRACTED" | tail -n 1)
+            if echo "$LAST_LINE" | grep -q '^## '; then
+              # Last line is a section header, remove it
+              REPORT=$(echo "$EXTRACTED" | head -n -1 | head -200)
+            else
+              # Last line is actual content, keep it
+              REPORT=$(echo "$EXTRACTED" | head -200)
+            fi
+          fi
+
+          # If we found a structured report, use it
+          if [ -n "$REPORT" ]; then
+            # Base64 encode to preserve formatting
+            echo "report_found=true" >> $GITHUB_OUTPUT
+            echo "report_content<<REPORT_EOF" >> $GITHUB_OUTPUT
+            echo "$REPORT" >> $GITHUB_OUTPUT
+            echo "REPORT_EOF" >> $GITHUB_OUTPUT
+          else
+            echo "report_found=false" >> $GITHUB_OUTPUT
+            # Fallback: extract lines matching the new format with "Status: FIXED/SKIPPED/etc"
+            # Updated pattern to match the actual format: "- **Status**: FIXED"
+            FALLBACK=$(grep -E "^\*\*Issue #|- \*\*Status\*\*: (FIXED|SKIPPED|MODIFIED|NOT_APPLICABLE)" /tmp/claude-output.log | head -50 || echo "")
+            if [ -n "$FALLBACK" ]; then
+              echo "fallback_content<<FALLBACK_EOF" >> $GITHUB_OUTPUT
+              echo "$FALLBACK" >> $GITHUB_OUTPUT
+              echo "FALLBACK_EOF" >> $GITHUB_OUTPUT
+            fi
+          fi
 
       - name: Configure git
         working-directory: pr-workspace
@@ -414,11 +461,17 @@ jobs:
         env:
           HAS_CHANGES: ${{ steps.commit.outputs.has_changes }}
           JOB_STATUS: ${{ job.status }}
+          REPORT_FOUND: ${{ steps.report.outputs.report_found }}
+          REPORT_CONTENT: ${{ steps.report.outputs.report_content }}
+          FALLBACK_CONTENT: ${{ steps.report.outputs.fallback_content }}
         with:
           script: |
             const prNumber = parseInt(process.env.PR_NUMBER);
             const hasChanges = process.env.HAS_CHANGES === 'true';
             const jobStatus = process.env.JOB_STATUS;
+            const reportFound = process.env.REPORT_FOUND === 'true';
+            const reportContent = process.env.REPORT_CONTENT || '';
+            const fallbackContent = process.env.FALLBACK_CONTENT || '';
 
             let body = '';
 
@@ -429,19 +482,58 @@ jobs:
                   '',
                   'Changes have been pushed to this branch.',
                   '',
-                  '**What happened:**',
-                  '- Read the review instructions from `REVIEW_INSTRUCTIONS.md`',
-                  '- Implemented the requested changes',
-                  '- Removed the instructions file',
-                  '- Committed and pushed to this branch',
+                ].join('\n');
+
+                // Add the detailed implementation report
+                if (reportFound && reportContent) {
+                  body += [
+                    '',
+                    '---',
+                    '',
+                    reportContent,
+                    '',
+                  ].join('\n');
+                } else if (fallbackContent) {
+                  body += [
+                    '',
+                    '---',
+                    '',
+                    '### Implementation Summary',
+                    '',
+                    fallbackContent,
+                    '',
+                  ].join('\n');
+                } else {
+                  body += [
+                    '',
+                    '**What happened:**',
+                    '- Read the review instructions from `REVIEW_INSTRUCTIONS.md`',
+                    '- Implemented the requested changes',
+                    '- Removed the instructions file',
+                    '- Committed and pushed to this branch',
+                    '',
+                  ].join('\n');
+                }
+
+                body += [
+                  '---',
+                  '',
+                  '**Legend:**',
+                  '- **FIXED**: Issue was addressed as suggested',
+                  '- **MODIFIED**: Issue was addressed with a different approach',
+                  '- **SKIPPED**: Issue was intentionally not addressed (see assessment)',
+                  '- **NOT_APPLICABLE**: Issue does not apply to current code state',
+                  '',
+                  '> Review the **Assessment** for each item to determine if the review suggestion was a legitimate issue or a false positive.',
                   '',
                   '---',
                   '',
                   '**Next Steps:**',
-                  '1. Review the new commits above',
-                  '2. Gemini will automatically review the new changes',
-                  '3. If more changes are needed, the cycle continues',
-                  '4. When satisfied, merge to main',
+                  '1. Review the implementation report above',
+                  '2. Check if any SKIPPEDs were correct decisions',
+                  '3. Gemini will automatically review the new changes',
+                  '4. If more changes are needed, the cycle continues',
+                  '5. When satisfied, merge to main',
                   '',
                   '*The review cycle continues until you merge.*'
                 ].join('\n');
@@ -451,12 +543,27 @@ jobs:
                   '',
                   'The implementation completed but no file changes were needed.',
                   '',
+                ].join('\n');
+
+                // Still include the report if available
+                if (reportFound && reportContent) {
+                  body += [
+                    '---',
+                    '',
+                    reportContent,
+                    '',
+                    '---',
+                    '',
+                  ].join('\n');
+                }
+
+                body += [
                   'This might happen if:',
                   '- The suggestions were already implemented',
+                  '- All review items were determined to be false positives',
                   '- The instructions didn\'t require code changes',
-                  '- The changes couldn\'t be applied',
                   '',
-                  'Please review the PR and provide additional instructions if needed.'
+                  'Please review the assessment above and provide additional instructions if needed.'
                 ].join('\n');
               }
             } else {

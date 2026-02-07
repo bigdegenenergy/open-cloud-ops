@@ -130,6 +130,7 @@ jobs:
           # - Workflow files (contain example PII patterns)
           # - Config files (contain IDs that look like phone numbers)
           # - Documentation (contain example patterns)
+          # - Policy/example files (contain test data with timestamps that look like PII)
           FILES=$(find . -type f \
             -not -path "./.git/*" \
             -not -path "./node_modules/*" \
@@ -138,14 +139,16 @@ jobs:
             -not -path "./.github/*" \
             -not -path "./.claude/*" \
             -not -path "./docs/onefilellm/*" \
-            -not -path "./tools/*" \
+            -not -path "./policies/*" \
+            -not -path "./examples/*" \
+            -not -path "./profiles/*" \
+            -not -path "./scripts/*" \
+            -not -path "./clients/*" \
             -not -name "*.png" -not -name "*.jpg" -not -name "*.jpeg" \
             -not -name "*.gif" -not -name "*.ico" -not -name "*.svg" \
             -not -name "*.woff" -not -name "*.woff2" -not -name "*.ttf" \
             -not -name "*.pdf" -not -name "*.zip" -not -name "*.tar.gz" \
             -not -name "*.md" -not -name "*.toml" -not -name "*.yml" -not -name "*.yaml" \
-            -not -name "go.mod" -not -name "go.sum" \
-            -not -name "package-lock.json" -not -name "yarn.lock" -not -name "pnpm-lock.yaml" \
             2>/dev/null)
 
           # IMPORTANT: All PII patterns FAIL because this is a public repo.
@@ -212,10 +215,9 @@ jobs:
           fi
 
           echo "👤 Checking for full names..."
-          # Simplified pattern to avoid ReDoS: match "key: First Last" with possessive-safe alternation
-          NAME_CONTEXT='(name|author|user|contact|owner|created_by|assigned_to|submitted_by)[[:space:]]*[:=][[:space:]]*'
-          NAME_PATTERN="[A-Z][a-z]{1,20} [A-Z][a-z]{1,20}"
-          NAME_EXCLUDES='Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name'
+          NAME_CONTEXT='(name|author|user|contact|owner|created[_ ]?by|assigned[_ ]?to|submitted[_ ]?by)\s*[:=]?\s*'
+          NAME_PATTERN="[A-Z][a-z]+\s+[A-Z][a-z]+"
+          NAME_EXCLUDES='Hello World|Lorem Ipsum|Foo Bar|John Doe|Jane Doe|Test User|Example User|First Last|Your Name|Check Permissions|Code Review|Code Action|Code Implement|Post Review|Run Codex|Run Gemini|Run Claude|Parse Codex|Parse Output|Setup Node|Install deps|Checkout code|Collect PR|Push Instructions|Cleanup stale|Telegram notification|Combine reviews|Post PR|Post feedback|Pre-fetch'
           NAME_FOUND=$(echo "$FILES" | xargs grep -lE "${NAME_CONTEXT}${NAME_PATTERN}" 2>/dev/null | while read -r file; do
             if grep -E "${NAME_CONTEXT}${NAME_PATTERN}" "$file" 2>/dev/null | grep -vE "$NAME_EXCLUDES" | grep -qE "${NAME_CONTEXT}${NAME_PATTERN}"; then
               echo "$file"

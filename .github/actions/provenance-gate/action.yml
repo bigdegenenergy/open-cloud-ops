@@ -1,0 +1,340 @@
+name: 'Provenance Gate'
+description: 'Enforce data provenance policy using OPA. Validates two-source rule, freshness, trust, and grading.'
+author: 'bigdegenenergy'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  policy_path:
+    description: 'Path to the policy bundle directory'
+    required: false
+    default: 'policies/provenance-gate/v1'
+  input_glob:
+    description: 'Glob pattern for input JSON files to evaluate'
+    required: false
+    default: 'governance_inputs/**/*.json'
+  config_path:
+    description: 'Path to repo-level config file (.governance/provenance-gate.yml)'
+    required: false
+    default: '.governance/provenance-gate.yml'
+  min_trust:
+    description: 'Minimum average trust score (overrides config file)'
+    required: false
+  max_age_hours:
+    description: 'Maximum age of source data in hours (overrides config file)'
+    required: false
+  min_grade:
+    description: 'Minimum acceptable grade: A, B, or C (overrides config file)'
+    required: false
+  required_sources:
+    description: 'Minimum number of distinct sources (overrides config file)'
+    required: false
+  opa_version:
+    description: 'OPA version to install'
+    required: false
+    default: '0.60.0'
+  fail_on_policy_test_failure:
+    description: 'Fail the workflow if OPA policy tests fail'
+    required: false
+    default: 'true'
+  governance_repo:
+    description: 'Governance repo to fetch policies from (owner/repo format). If empty, uses local policies.'
+    required: false
+    default: ''
+  governance_repo_ref:
+    description: 'Git ref (branch, tag, or SHA) for governance repo'
+    required: false
+    default: 'main'
+
+outputs:
+  result:
+    description: 'Overall result: pass or fail'
+    value: ${{ steps.evaluate.outputs.result }}
+  summary:
+    description: 'JSON summary of all evaluations'
+    value: ${{ steps.evaluate.outputs.summary }}
+  failed_cards:
+    description: 'Comma-separated list of card_ids that failed'
+    value: ${{ steps.evaluate.outputs.failed_cards }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install OPA
+      shell: bash
+      env:
+        OPA_VERSION: ${{ inputs.opa_version }}
+      run: |
+        echo "Installing OPA v${OPA_VERSION}..."
+
+        # Download OPA binary
+        curl -L -o opa "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static"
+
+        # Known checksums for OPA releases (pinned for security)
+        # To add a new version: download the official .sha256 file and add it here
+        case "${OPA_VERSION}" in
+          "0.60.0")
+            EXPECTED_CHECKSUM="3b5c2707f54f7912649223b2afd6df0331c8f5d5785507db1f9e7e306e6c15d7"
+            ;;
+          *)
+            echo "::error::OPA version ${OPA_VERSION} checksum not pinned. Add the checksum to action.yml"
+            exit 1
+            ;;
+        esac
+
+        # Verify checksum
+        echo "${EXPECTED_CHECKSUM}  opa" | sha256sum -c -
+
+        chmod +x opa
+        sudo mv opa /usr/local/bin/opa
+        opa version
+
+    - name: Fetch Governance Policies
+      if: inputs.governance_repo != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GOVERNANCE_REPO: ${{ inputs.governance_repo }}
+        GOVERNANCE_REPO_REF: ${{ inputs.governance_repo_ref }}
+        POLICY_PATH_INPUT: ${{ inputs.policy_path }}
+      run: |
+        # Validate inputs to prevent command injection
+        if ! [[ "$GOVERNANCE_REPO" =~ ^[a-zA-Z0-9_/-]+$ ]]; then
+          echo "::error::Invalid governance_repo format. Must match pattern ^[a-zA-Z0-9_/-]+$"
+          exit 1
+        fi
+        if ! [[ "$GOVERNANCE_REPO_REF" =~ ^[a-zA-Z0-9_/.@-]+$ ]]; then
+          echo "::error::Invalid governance_repo_ref format. Must match pattern ^[a-zA-Z0-9_/.@-]+$"
+          exit 1
+        fi
+
+        echo "Fetching policies from ${GOVERNANCE_REPO}@${GOVERNANCE_REPO_REF}..."
+        mkdir -p .governance-policies
+        gh api "repos/${GOVERNANCE_REPO}/tarball/${GOVERNANCE_REPO_REF}" > governance.tar.gz
+        tar -xzf governance.tar.gz -C .governance-policies --strip-components=1
+        rm governance.tar.gz
+        echo "POLICY_PATH=.governance-policies/${POLICY_PATH_INPUT}" >> $GITHUB_ENV
+
+    - name: Set Local Policy Path
+      if: inputs.governance_repo == ''
+      shell: bash
+      env:
+        POLICY_PATH_INPUT: ${{ inputs.policy_path }}
+      run: |
+        echo "Using local policies at ${POLICY_PATH_INPUT}"
+        echo "POLICY_PATH=${POLICY_PATH_INPUT}" >> $GITHUB_ENV
+
+    - name: Run OPA Policy Tests
+      id: policy_tests
+      shell: bash
+      env:
+        FAIL_ON_TEST_FAILURE: ${{ inputs.fail_on_policy_test_failure }}
+      run: |
+        echo "Running OPA policy tests..."
+        set +e
+        opa test "$POLICY_PATH" -v 2>&1 | tee opa-test-output.txt
+        TEST_EXIT_CODE=${PIPESTATUS[0]}
+        set -e
+
+        if [ $TEST_EXIT_CODE -ne 0 ]; then
+          echo "::error::OPA policy tests failed"
+          echo "test_passed=false" >> $GITHUB_OUTPUT
+          if [ "$FAIL_ON_TEST_FAILURE" == "true" ]; then
+            exit 1
+          fi
+        else
+          echo "test_passed=true" >> $GITHUB_OUTPUT
+          echo "OPA policy tests passed"
+        fi
+
+    - name: Load Repository Config
+      id: load_config
+      shell: bash
+      env:
+        CONFIG_PATH_INPUT: ${{ inputs.config_path }}
+        MIN_TRUST_INPUT: ${{ inputs.min_trust }}
+        MAX_AGE_HOURS_INPUT: ${{ inputs.max_age_hours }}
+        MIN_GRADE_INPUT: ${{ inputs.min_grade }}
+        REQUIRED_SOURCES_INPUT: ${{ inputs.required_sources }}
+      run: |
+        CONFIG_FILE="$CONFIG_PATH_INPUT"
+
+        # Default values
+        MIN_TRUST="$MIN_TRUST_INPUT"
+        MAX_AGE_HOURS="$MAX_AGE_HOURS_INPUT"
+        MIN_GRADE="$MIN_GRADE_INPUT"
+        REQUIRED_SOURCES="$REQUIRED_SOURCES_INPUT"
+        ALLOWED_SOURCE_IDS=""
+
+        # Load from config file if exists and no override provided
+        if [ -f "$CONFIG_FILE" ]; then
+          echo "Loading config from $CONFIG_FILE"
+
+          if [ -z "$MIN_TRUST" ]; then
+            MIN_TRUST=$(yq -r '.min_trust // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+          fi
+          if [ -z "$MAX_AGE_HOURS" ]; then
+            MAX_AGE_HOURS=$(yq -r '.max_age_hours // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+          fi
+          if [ -z "$MIN_GRADE" ]; then
+            MIN_GRADE=$(yq -r '.min_grade // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+          fi
+          if [ -z "$REQUIRED_SOURCES" ]; then
+            REQUIRED_SOURCES=$(yq -r '.required_sources // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+          fi
+          ALLOWED_SOURCE_IDS=$(yq -r '.allowed_source_ids // [] | @json' "$CONFIG_FILE" 2>/dev/null || echo "[]")
+        fi
+
+        # Apply defaults if still empty
+        MIN_TRUST="${MIN_TRUST:-0.7}"
+        MAX_AGE_HOURS="${MAX_AGE_HOURS:-24}"
+        MIN_GRADE="${MIN_GRADE:-B}"
+        REQUIRED_SOURCES="${REQUIRED_SOURCES:-2}"
+        ALLOWED_SOURCE_IDS="${ALLOWED_SOURCE_IDS:-[]}"
+
+        echo "min_trust=$MIN_TRUST" >> $GITHUB_OUTPUT
+        echo "max_age_hours=$MAX_AGE_HOURS" >> $GITHUB_OUTPUT
+        echo "min_grade=$MIN_GRADE" >> $GITHUB_OUTPUT
+        echo "required_sources=$REQUIRED_SOURCES" >> $GITHUB_OUTPUT
+        echo "allowed_source_ids=$ALLOWED_SOURCE_IDS" >> $GITHUB_OUTPUT
+
+        echo "Configuration:"
+        echo "  min_trust: $MIN_TRUST"
+        echo "  max_age_hours: $MAX_AGE_HOURS"
+        echo "  min_grade: $MIN_GRADE"
+        echo "  required_sources: $REQUIRED_SOURCES"
+        echo "  allowed_source_ids: $ALLOWED_SOURCE_IDS"
+
+    - name: Evaluate Inputs
+      id: evaluate
+      shell: bash
+      env:
+        INPUT_GLOB: ${{ inputs.input_glob }}
+        MIN_TRUST: ${{ steps.load_config.outputs.min_trust }}
+        MAX_AGE_HOURS: ${{ steps.load_config.outputs.max_age_hours }}
+        MIN_GRADE: ${{ steps.load_config.outputs.min_grade }}
+        REQUIRED_SOURCES: ${{ steps.load_config.outputs.required_sources }}
+        ALLOWED_SOURCE_IDS: ${{ steps.load_config.outputs.allowed_source_ids }}
+      run: |
+        echo "Evaluating inputs matching: $INPUT_GLOB"
+
+        FAILED_CARDS=""
+        PASS_COUNT=0
+        FAIL_COUNT=0
+        SUMMARY="[]"
+        OVERALL_RESULT="pass"
+
+        # Build config JSON
+        CONFIG_JSON=$(cat <<EOF
+        {
+          "min_trust": $MIN_TRUST,
+          "max_age_hours": $MAX_AGE_HOURS,
+          "min_grade": "$MIN_GRADE",
+          "required_sources": $REQUIRED_SOURCES,
+          "allowed_source_ids": $ALLOWED_SOURCE_IDS
+        }
+        EOF
+        )
+
+        # Find and evaluate each input file using safe iteration
+        # Use globstar to expand the INPUT_GLOB pattern correctly
+        shopt -s globstar nullglob
+
+        # Build array of files matching the glob pattern
+        INPUT_FILES=()
+        for file in $INPUT_GLOB; do
+          if [ -f "$file" ]; then
+            INPUT_FILES+=("$file")
+          fi
+        done
+
+        if [ ${#INPUT_FILES[@]} -eq 0 ]; then
+          echo "::warning::No files found matching pattern: $INPUT_GLOB"
+          echo "result=pass" >> $GITHUB_OUTPUT
+          echo "failed_cards=" >> $GITHUB_OUTPUT
+          echo "summary=[]" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Iterate over files safely with quoted variable expansion
+        for INPUT_FILE in "${INPUT_FILES[@]}"; do
+          echo "----------------------------------------"
+          echo "Evaluating: $INPUT_FILE"
+
+          # Strip any config from input file and use only trusted config
+          INPUT_WITH_CONFIG=$(jq --argjson config "$CONFIG_JSON" 'del(.config) | . + {config: $config}' "$INPUT_FILE")
+
+          # Run OPA evaluation
+          DECISION=$(echo "$INPUT_WITH_CONFIG" | opa eval -d "$POLICY_PATH/policy.rego" -I 'data.provenance.gate.v1.decision' --format=raw 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "::error file=$INPUT_FILE::OPA evaluation failed: $DECISION"
+            OVERALL_RESULT="fail"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            continue
+          fi
+
+          # Parse decision
+          ALLOW=$(echo "$DECISION" | jq -r '.allow')
+          GRADE=$(echo "$DECISION" | jq -r '.grade')
+          CARD_ID=$(echo "$DECISION" | jq -r '.card_id')
+          DENY_REASONS=$(echo "$DECISION" | jq -r '.deny_reasons | join("; ")')
+          SOURCE_COUNT=$(echo "$DECISION" | jq -r '.source_count')
+          AVG_TRUST=$(echo "$DECISION" | jq -r '.average_trust')
+
+          # Add to summary
+          ENTRY=$(jq -n \
+            --arg file "$INPUT_FILE" \
+            --arg card_id "$CARD_ID" \
+            --argjson allow "$ALLOW" \
+            --arg grade "$GRADE" \
+            --arg reasons "$DENY_REASONS" \
+            '{file: $file, card_id: $card_id, allow: $allow, grade: $grade, deny_reasons: $reasons}')
+          SUMMARY=$(echo "$SUMMARY" | jq --argjson entry "$ENTRY" '. + [$entry]')
+
+          if [ "$ALLOW" == "true" ]; then
+            echo "::notice file=$INPUT_FILE,title=Provenance Gate PASS::card_id=$CARD_ID grade=$GRADE sources=$SOURCE_COUNT avg_trust=$AVG_TRUST"
+            PASS_COUNT=$((PASS_COUNT + 1))
+          else
+            echo "::error file=$INPUT_FILE,title=Provenance Gate FAIL::card_id=$CARD_ID grade=$GRADE - $DENY_REASONS"
+            OVERALL_RESULT="fail"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            if [ -n "$FAILED_CARDS" ]; then
+              FAILED_CARDS="$FAILED_CARDS,$CARD_ID"
+            else
+              FAILED_CARDS="$CARD_ID"
+            fi
+          fi
+        done
+
+        echo "----------------------------------------"
+        echo "Summary: $PASS_COUNT passed, $FAIL_COUNT failed"
+        echo ""
+
+        # Set outputs
+        echo "result=$OVERALL_RESULT" >> $GITHUB_OUTPUT
+        echo "failed_cards=$FAILED_CARDS" >> $GITHUB_OUTPUT
+
+        # Handle multiline JSON output
+        {
+          echo 'summary<<EOF'
+          echo "$SUMMARY"
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT
+
+        # Fail if any evaluations failed
+        if [ "$OVERALL_RESULT" == "fail" ]; then
+          echo ""
+          echo "::error::Provenance Gate failed for $FAIL_COUNT input(s)"
+          exit 1
+        fi
+
+    - name: Cleanup
+      if: always() && inputs.governance_repo != ''
+      shell: bash
+      env:
+        GOVERNANCE_REPO: ${{ inputs.governance_repo }}
+      run: |
+        rm -rf .governance-policies

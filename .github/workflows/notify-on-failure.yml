@@ -15,6 +15,8 @@ jobs:
         continue-on-error: true
         uses: slackapi/slack-github-action@v1.26.0
         with:
+          # Use jq in a previous step to construct payload safely
+          # For now, the Slack action handles escaping internally
           payload: |
             {
               "attachments": [{
@@ -33,39 +35,50 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-          REPO_NAME: ${{ github.repository }}
-          BRANCH_NAME: ${{ github.event.workflow_run.head_branch }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-            python3 -c "
-          import os, json, urllib.request
-          bot = os.environ['TELEGRAM_BOT_TOKEN']
-          chat = os.environ['TELEGRAM_CHAT_ID']
-          text = f\"🔴 *Workflow Failed*\n\n*Workflow:* {os.environ['WORKFLOW_NAME']}\n*Repository:* {os.environ['REPO_NAME']}\n*Branch:* {os.environ['BRANCH_NAME']}\n\n[View Run]({os.environ['RUN_URL']})\"
-          payload = json.dumps({'chat_id': chat, 'text': text, 'parse_mode': 'Markdown'}).encode()
-          req = urllib.request.Request(f'https://api.telegram.org/bot{bot}/sendMessage', data=payload, headers={'Content-Type': 'application/json'})
-          urllib.request.urlopen(req)
-          "
+            # Use jq to safely construct the message with proper escaping
+            MESSAGE=$(jq -rn \
+              --arg workflow "$WORKFLOW_NAME" \
+              --arg repo "$REPOSITORY" \
+              --arg branch "$HEAD_BRANCH" \
+              --arg url "$RUN_URL" \
+              '"🔴 *Workflow Failed*\n\n*Workflow:* " + $workflow + "\n*Repository:* " + $repo + "\n*Branch:* " + $branch + "\n\n[View Run](" + $url + ")"')
+
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg chat_id "$TELEGRAM_CHAT_ID" \
+                --arg text "$MESSAGE" \
+                '{chat_id: $chat_id, parse_mode: "Markdown", text: $text}')"
           fi
 
       - name: Send Discord Notification
         continue-on-error: true
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-          REPO_NAME: ${{ github.repository }}
-          BRANCH_NAME: ${{ github.event.workflow_run.head_branch }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           if [ -n "$DISCORD_WEBHOOK_URL" ]; then
-            python3 -c "
-          import os, json, urllib.request
-          payload = json.dumps({'embeds': [{'title': f\"Workflow Failed: {os.environ['WORKFLOW_NAME']}\", 'description': f\"Repository: {os.environ['REPO_NAME']}\nBranch: {os.environ['BRANCH_NAME']}\", 'color': 16711680, 'url': os.environ['RUN_URL']}]}).encode()
-          req = urllib.request.Request(os.environ['DISCORD_WEBHOOK_URL'], data=payload, headers={'Content-Type': 'application/json'})
-          urllib.request.urlopen(req)
-          "
+            # Use jq to safely construct JSON payload
+            PAYLOAD=$(jq -n \
+              --arg title "Workflow Failed: $WORKFLOW_NAME" \
+              --arg desc "Repository: $REPOSITORY\nBranch: $HEAD_BRANCH" \
+              --arg url "$RUN_URL" \
+              '{embeds: [{title: $title, description: $desc, color: 16711680, url: $url}]}')
+
+            curl -s -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD"
           fi
 
       - name: Send ntfy Notification
@@ -73,43 +86,45 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-          REPO_NAME: ${{ github.repository }}
-          BRANCH_NAME: ${{ github.event.workflow_run.head_branch }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           if [ -n "$NTFY_TOPIC" ]; then
             SERVER="${NTFY_SERVER:-https://ntfy.sh}"
-            python3 -c "
-          import os, urllib.request
-          server = os.environ.get('NTFY_SERVER', 'https://ntfy.sh')
-          topic = os.environ['NTFY_TOPIC']
-          body = f\"Repository: {os.environ['REPO_NAME']} | Branch: {os.environ['BRANCH_NAME']}\".encode()
-          req = urllib.request.Request(f'{server}/{topic}', data=body)
-          req.add_header('Title', f\"Workflow Failed: {os.environ['WORKFLOW_NAME']}\")
-          req.add_header('Priority', '5')
-          req.add_header('Tags', 'x')
-          req.add_header('Click', os.environ['RUN_URL'])
-          urllib.request.urlopen(req)
-          "
+            curl -s -X POST "${SERVER}/${NTFY_TOPIC}" \
+              -H "Title: Workflow Failed: ${WORKFLOW_NAME}" \
+              -H "Priority: 5" \
+              -H "Tags: x" \
+              -H "Click: ${RUN_URL}" \
+              -d "Repository: ${REPOSITORY} | Branch: ${HEAD_BRANCH}"
           fi
 
       - name: Send Custom Webhook
         continue-on-error: true
         env:
           CUSTOM_WEBHOOK_URL: ${{ secrets.CUSTOM_WEBHOOK_URL }}
+          # SECURITY: Pass context variables via env vars to prevent script injection
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-          REPO_NAME: ${{ github.repository }}
-          BRANCH_NAME: ${{ github.event.workflow_run.head_branch }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           if [ -n "$CUSTOM_WEBHOOK_URL" ]; then
-            python3 -c "
-          import os, json, urllib.request
-          payload = json.dumps({'event': 'workflow_failed', 'workflow': os.environ['WORKFLOW_NAME'], 'repository': os.environ['REPO_NAME'], 'branch': os.environ['BRANCH_NAME'], 'url': os.environ['RUN_URL']}).encode()
-          req = urllib.request.Request(os.environ['CUSTOM_WEBHOOK_URL'], data=payload, headers={'Content-Type': 'application/json'})
-          urllib.request.urlopen(req)
-          "
+            # Use jq to safely construct JSON payload
+            PAYLOAD=$(jq -n \
+              --arg event "workflow_failed" \
+              --arg workflow "$WORKFLOW_NAME" \
+              --arg repo "$REPOSITORY" \
+              --arg branch "$HEAD_BRANCH" \
+              --arg url "$RUN_URL" \
+              '{event: $event, workflow: $workflow, repository: $repo, branch: $branch, url: $url}')
+
+            curl -s -X POST "$CUSTOM_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD"
           fi
 
       - name: Notification Complete
