@@ -131,6 +131,7 @@ jobs:
           # - Config files (contain IDs that look like phone numbers)
           # - Documentation (contain example patterns)
           # - Policy/example files (contain test data with timestamps that look like PII)
+          # - Go module files (version hashes trigger phone number pattern matches)
           FILES=$(find . -type f \
             -not -path "./.git/*" \
             -not -path "./node_modules/*" \
@@ -149,6 +150,7 @@ jobs:
             -not -name "*.woff" -not -name "*.woff2" -not -name "*.ttf" \
             -not -name "*.pdf" -not -name "*.zip" -not -name "*.tar.gz" \
             -not -name "*.md" -not -name "*.toml" -not -name "*.yml" -not -name "*.yaml" \
+            -not -name "go.mod" -not -name "go.sum" \
             2>/dev/null)
 
           # IMPORTANT: All PII patterns FAIL because this is a public repo.
