@@ -1,0 +1,66 @@
+# Feature Pipeline Workflow
+#
+# A complete feature implementation workflow with quality gates.
+# Usage: /workflow feature-pipeline --var description="Add user authentication"
+
+name: feature-pipeline
+description: Full feature implementation with planning, coding, testing, review, and shipping
+version: "1.0.0"
+
+steps:
+  - name: plan
+    command: /plan
+    inputs:
+      description: "{{ description }}"
+    timeout_seconds: 300
+
+  - name: implement
+    agent: "@typescript-pro"
+    inputs:
+      task: "Implement the feature based on the plan"
+      guidelines: "Follow existing patterns, write clean code"
+    timeout_seconds: 1800
+
+  - name: test
+    command: /qa
+    timeout_seconds: 600
+    gate:
+      type: conditional
+      condition: "test_results.failed == 0"
+      fallback: fail
+      message: "Tests must pass before proceeding"
+
+  - name: simplify
+    command: /simplify
+    timeout_seconds: 600
+
+  - name: review
+    agent: "@code-reviewer"
+    timeout_seconds: 600
+    gate:
+      type: conditional
+      condition: "findings.critical == 0"
+      fallback: fail
+      message: "No critical issues allowed"
+
+  - name: final-approval
+    command: /qa
+    gate:
+      type: manual
+      message: "All checks passed. Ready to ship?"
+      notify: true
+
+  - name: ship
+    command: /ship
+    inputs:
+      message: "{{ description }}"
+
+on_failure: notify
+on_success: notify
+timeout_seconds: 7200
+
+metadata:
+  category: development
+  tags:
+    - feature
+    - full-stack

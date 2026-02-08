@@ -1,0 +1,16 @@
+{
+  "name": "autonomous-coding-agent",
+  "version": "1.0.0",
+  "description": "Autonomous coding agent with Claude SDK and MCP servers",
+  "type": "module",
+  "scripts": {
+    "install-mcp": "npm install"
+  },
+  "dependencies": {
+    "puppeteer-mcp-server": "1.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
