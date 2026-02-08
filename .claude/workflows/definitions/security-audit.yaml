@@ -1,0 +1,70 @@
+# Security Audit Workflow
+#
+# Comprehensive security audit with Zeno analysis and review.
+# Usage: /workflow security-audit --var target="src/"
+
+name: security-audit
+description: Security audit with evidence-based analysis and remediation
+version: "1.0.0"
+
+steps:
+  - name: scan
+    agent: "@security-auditor"
+    inputs:
+      target: "{{ target }}"
+      scope: "full"
+    outputs:
+      - vulnerabilities
+    timeout_seconds: 900
+
+  - name: analyze
+    agent: "@zeno-analyzer"
+    inputs:
+      focus: "security"
+      files: "{{ target }}"
+    outputs:
+      - findings
+    timeout_seconds: 600
+
+  - name: critical-check
+    command: /zeno-verify
+    gate:
+      type: conditional
+      condition: "findings.critical == 0"
+      fallback: fail
+      message: "Critical vulnerabilities found - workflow stopped"
+
+  - name: high-check
+    command: /qa
+    gate:
+      type: conditional
+      condition: "findings.high <= 2"
+      fallback: continue
+      message: "High severity issues found - review recommended"
+
+  - name: generate-report
+    shell: |
+      echo "# Security Audit Report" > security-report.md
+      echo "Generated: $(date)" >> security-report.md
+      echo "" >> security-report.md
+      echo "## Summary" >> security-report.md
+    timeout_seconds: 60
+
+  - name: remediation-decision
+    command: /review
+    gate:
+      type: manual
+      message: "Review findings and decide on remediation approach"
+      notify: true
+      approvers:
+        - security-team
+
+on_failure: notify
+on_success: notify
+timeout_seconds: 3600
+
+metadata:
+  category: security
+  tags:
+    - audit
+    - compliance

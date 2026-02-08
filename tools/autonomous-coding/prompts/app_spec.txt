@@ -1,0 +1,41 @@
+Application Specification
+==========================
+
+This file contains the specification for the application you want the autonomous agent to build.
+
+Edit this file before running the agent to specify:
+1. Application type (web app, CLI tool, API, etc.)
+2. Core features and functionality
+3. Technology stack (if preferred)
+4. UI/UX requirements
+5. Performance requirements
+6. Any specific integrations or APIs needed
+
+Example:
+
+---
+
+Build a full-stack web application for [your project here]
+
+Core Features:
+- [Feature 1]
+- [Feature 2]
+- [Feature 3]
+
+Technology Stack:
+- Frontend: React, TypeScript, Tailwind CSS
+- Backend: Node.js + Express
+- Database: PostgreSQL
+
+UI Requirements:
+- Responsive design
+- Dark mode support
+- Accessibility (WCAG 2.1 AA)
+
+Performance:
+- Lighthouse score > 90
+- First contentful paint < 1s
+
+---
+
+Replace this with your actual specification before running the agent.
